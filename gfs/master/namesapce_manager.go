@@ -13,6 +13,8 @@ type namespaceManager struct {
 type nsTree struct {
 	sync.RWMutex
 
+	name string
+
 	// if it is a directory
 	isDir    bool
 	children map[string]*nsTree
@@ -51,19 +53,41 @@ func (nm *namespaceManager) withRLock(p gfs.Path, f func(*nsTree) error) error {
 	return f(nodes[len(parts)])
 }
 
+func copy(n *nsTree, info *gfs.PathInfo) {
+	info.Name = n.name
+	info.IsDir = n.isDir
+	info.Length = n.length
+	info.Chunks = n.chunks
+}
+
 // GetPathInfo returns the information of a file or directory.
 // If the file or directory does not exist, it returns an error.
 func (nm *namespaceManager) GetPathInfo(p gfs.Path) (gfs.PathInfo, error) {
 	var info gfs.PathInfo
-	nm.withRLock(p, func(n *nsTree) error {
+	err := nm.withRLock(p, func(n *nsTree) error {
 		n.RLock()
 		defer n.RUnlock()
-		info.IsDir = n.isDir
-		info.Length = n.length
-		info.Chunks = n.chunks
+		copy(n, &info)
 		return nil
 	})
-	return info, nil
+	return info, err
+}
+
+// List lists all the files and directories under a directory.
+// If the directory does not exist, it returns an error.
+func (nm *namespaceManager) List(p gfs.Path) ([]gfs.PathInfo, error) {
+	var infos []gfs.PathInfo
+	err := nm.withRLock(p, func(n *nsTree) error {
+		n.RLock()
+		defer n.RUnlock()
+		for _, v := range n.children {
+			var info gfs.PathInfo
+			copy(v, &info)
+			infos = append(infos, info)
+		}
+		return nil
+	})
+	return infos, err
 }
 
 // Create creates an empty file on path p. All parents should exist.
@@ -75,7 +99,7 @@ func (nm *namespaceManager) Create(p gfs.Path) error {
 		if _, ok := n.children[file]; ok {
 			return fmt.Errorf("file %v already exists", file)
 		}
-		n.children[file] = &nsTree{isDir: false, length: 0, chunks: 0}
+		n.children[file] = &nsTree{name: file, isDir: false, length: 0, chunks: 0}
 		return nil
 	})
 }
@@ -89,7 +113,7 @@ func (nm *namespaceManager) Mkdir(p gfs.Path) error {
 		if _, ok := n.children[dir_]; ok {
 			return fmt.Errorf("directory %v already exists", dir_)
 		}
-		n.children[dir_] = &nsTree{isDir: true, children: make(map[string]*nsTree)}
+		n.children[dir_] = &nsTree{name: dir_, isDir: true, children: make(map[string]*nsTree)}
 		return nil
 	})
 }

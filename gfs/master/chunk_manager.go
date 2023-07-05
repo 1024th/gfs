@@ -18,9 +18,11 @@ type chunkManager struct {
 	numChunkHandle gfs.ChunkHandle
 }
 
+type ServerSet = util.ArraySet[gfs.ServerAddress]
+
 type chunkInfo struct {
 	sync.RWMutex
-	location util.ArraySet     // set of replica locations
+	location ServerSet         // set of replica locations
 	primary  gfs.ServerAddress // primary chunkserver
 	expire   time.Time         // lease expire time
 	path     gfs.Path
@@ -59,7 +61,7 @@ func (cm *chunkManager) RegisterReplica(handle gfs.ChunkHandle, addr gfs.ServerA
 }
 
 // GetReplicas returns the replicas of a chunk
-func (cm *chunkManager) GetReplicas(handle gfs.ChunkHandle) (*util.ArraySet, error) {
+func (cm *chunkManager) GetReplicas(handle gfs.ChunkHandle) (*ServerSet, error) {
 	cm.RLock()
 	defer cm.RUnlock()
 	chunk_info, ok := cm.chunk[handle]
@@ -100,7 +102,7 @@ func (cm *chunkManager) GetLeaseHolder(handle gfs.ChunkHandle) (*lease, error) {
 	if chunk_info.primary == "" { // no one has a lease, grant a new one
 		chunk_info.RUnlock()
 		chunk_info.Lock()
-		chunk_info.primary = chunk_info.location.RandomPick().(gfs.ServerAddress)
+		chunk_info.primary = chunk_info.location.RandomPick()
 		chunk_info.expire = time.Now().Add(gfs.LeaseExpire)
 		chunk_info.Unlock()
 		chunk_info.RLock()
@@ -112,7 +114,7 @@ func (cm *chunkManager) GetLeaseHolder(handle gfs.ChunkHandle) (*lease, error) {
 	l.secondaries = make([]gfs.ServerAddress, 0, chunk_info.location.Size()-1)
 	for _, addr := range chunk_info.location.GetAll() {
 		if addr != chunk_info.primary {
-			svr_addr := addr.(gfs.ServerAddress)
+			svr_addr := addr
 			l.secondaries = append(l.secondaries, svr_addr)
 		}
 	}
@@ -151,7 +153,7 @@ func (cm *chunkManager) CreateChunk(path gfs.Path, addrs []gfs.ServerAddress) (g
 		primary: "",
 		path:    path,
 	}
-	for addr := range addrs {
+	for _, addr := range addrs {
 		chunk_info.location.Add(addr)
 	}
 	cm.numChunkHandle++

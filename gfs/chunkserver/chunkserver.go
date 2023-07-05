@@ -21,9 +21,9 @@ type ChunkServer struct {
 	shutdown   chan struct{}
 	dead       bool // set to true if server is shutdown
 
-	dl                     *downloadBuffer                // expiring download buffer
-	pendingLeaseExtensions *util.ArraySet                 // pending lease extension
-	chunk                  map[gfs.ChunkHandle]*chunkInfo // chunk information
+	dl                     *downloadBuffer                 // expiring download buffer
+	pendingLeaseExtensions *util.ArraySet[gfs.ChunkHandle] // pending lease extension
+	chunk                  map[gfs.ChunkHandle]*chunkInfo  // chunk information
 }
 
 type Mutation struct {
@@ -49,7 +49,7 @@ func NewAndServe(addr, masterAddr gfs.ServerAddress, serverRoot string) *ChunkSe
 		master:                 masterAddr,
 		serverRoot:             serverRoot,
 		dl:                     newDownloadBuffer(gfs.DownloadBufferExpire, gfs.DownloadBufferTick),
-		pendingLeaseExtensions: new(util.ArraySet),
+		pendingLeaseExtensions: new(util.ArraySet[gfs.ChunkHandle]),
 		chunk:                  make(map[gfs.ChunkHandle]*chunkInfo),
 	}
 	rpcs := rpc.NewServer()
@@ -92,11 +92,7 @@ func NewAndServe(addr, masterAddr gfs.ServerAddress, serverRoot string) *ChunkSe
 				return
 			default:
 			}
-			pe := cs.pendingLeaseExtensions.GetAllAndClear()
-			le := make([]gfs.ChunkHandle, len(pe))
-			for i, v := range pe {
-				le[i] = v.(gfs.ChunkHandle)
-			}
+			le := cs.pendingLeaseExtensions.GetAllAndClear()
 			args := &gfs.HeartbeatArg{
 				Address:         addr,
 				LeaseExtensions: le,

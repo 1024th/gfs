@@ -102,37 +102,68 @@ func (m *Master) BackgroundActivity() error {
 // RPCHeartbeat is called by chunkserver to let the master know that a chunkserver is alive.
 // Lease extension request is included.
 func (m *Master) RPCHeartbeat(args gfs.HeartbeatArg, reply *gfs.HeartbeatReply) error {
+	m.csm.Heartbeat(args.Address)
+	for _, handle := range args.LeaseExtensions {
+		err := m.cm.ExtendLease(handle, args.Address)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 // RPCGetPrimaryAndSecondaries returns lease holder and secondaries of a chunk.
 // If no one holds the lease currently, grant one.
 func (m *Master) RPCGetPrimaryAndSecondaries(args gfs.GetPrimaryAndSecondariesArg, reply *gfs.GetPrimaryAndSecondariesReply) error {
+	p, err := m.cm.GetLeaseHolder(args.Handle)
+	if err != nil {
+		return err
+	}
+	reply.Primary = p.primary
+	reply.Expire = p.expire
+	reply.Secondaries = p.secondaries
 	return nil
 }
 
 // RPCGetReplicas is called by client to find all chunkservers that hold the chunk.
 func (m *Master) RPCGetReplicas(args gfs.GetReplicasArg, reply *gfs.GetReplicasReply) error {
+	l, err := m.cm.GetReplicas(args.Handle)
+	if err != nil {
+		return err
+	}
+	reply.Locations = l.GetAll()
 	return nil
 }
 
 // RPCList is called by client to list all files under a directory
 func (m *Master) RPCList(args gfs.ListArg, reply *gfs.ListReply) error {
+	infos, err := m.nm.List(args.Path)
+	if err != nil {
+		return err
+	}
+	reply.Files = infos
 	return nil
 }
 
 // RPCCreateFile is called by client to create a new file
 func (m *Master) RPCCreateFile(args gfs.CreateFileArg, reply *gfs.CreateFileReply) error {
-	return nil
+	return m.nm.Create(args.Path)
 }
 
 // RPCMkdir is called by client to make a new directory
 func (m *Master) RPCMkdir(args gfs.MkdirArg, reply *gfs.MkdirReply) error {
-	return nil
+	return m.nm.Mkdir(args.Path)
 }
 
 // RPCGetFileInfo is called by client to get file information
 func (m *Master) RPCGetFileInfo(args gfs.GetFileInfoArg, reply *gfs.GetFileInfoReply) error {
+	info, err := m.nm.GetPathInfo(args.Path)
+	if err != nil {
+		return err
+	}
+	reply.IsDir = info.IsDir
+	reply.Length = info.Length
+	reply.Chunks = info.Chunks
 	return nil
 }
 
