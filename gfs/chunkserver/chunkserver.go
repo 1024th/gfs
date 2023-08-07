@@ -127,7 +127,7 @@ func (cs *ChunkServer) Shutdown() {
 // It saves client pushed data to memory buffer and forward to all other replicas.
 // Returns a DataID which represents the index in the memory buffer.
 func (cs *ChunkServer) RPCPushDataAndForward(args gfs.PushDataAndForwardArg, reply *gfs.PushDataAndForwardReply) error {
-	id := cs.dl.New(args.Handle)
+	id := gfs.NewDataID(args.Handle)
 	cs.dl.Set(id, args.Data)
 	for _, server := range args.ForwardTo {
 		var reply_ gfs.ForwardDataReply

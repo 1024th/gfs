@@ -49,13 +49,6 @@ func newDownloadBuffer(expire, tick time.Duration) *downloadBuffer {
 	return buf
 }
 
-// allocate a new DataID for given handle
-func (buf *downloadBuffer) New(handle gfs.ChunkHandle) gfs.DataBufferID {
-	now := time.Now()
-	timeStamp := now.UnixNano()
-	return gfs.DataBufferID{Handle: handle, TimeStamp: timeStamp}
-}
-
 func (buf *downloadBuffer) Set(id gfs.DataBufferID, data []byte) {
 	buf.Lock()
 	defer buf.Unlock()

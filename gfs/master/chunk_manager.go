@@ -74,6 +74,7 @@ func (cm *chunkManager) GetReplicas(handle gfs.ChunkHandle) (*ServerSet, error) 
 }
 
 // GetChunk returns the chunk handle for (path, index).
+// If the index exceeds the number of chunks in the file, returns an error.
 func (cm *chunkManager) GetChunk(path gfs.Path, index gfs.ChunkIndex) (gfs.ChunkHandle, error) {
 	cm.RLock()
 	defer cm.RUnlock()

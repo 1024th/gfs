@@ -6,6 +6,9 @@ The framework given in [this lab](https://bitbucket.org/abcdabcd987/ppca-gfs/) w
 
 ## TODO
 
-- Error code
+- Error code, io.EOF
+- Append
 - Stale replica detection (chunk version)
 - GC, ...
+- Cache on client side
+  - cache the chunk handle and locations of the replicas, using the file name and chunk index as the key

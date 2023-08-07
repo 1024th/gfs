@@ -1,6 +1,7 @@
 package master
 
 import (
+	"fmt"
 	"net"
 	"net/rpc"
 	"time"
@@ -170,10 +171,37 @@ func (m *Master) RPCGetFileInfo(args gfs.GetFileInfoArg, reply *gfs.GetFileInfoR
 // RPCGetChunkHandle returns the chunk handle of (path, index).
 // If the requested index is bigger than the number of chunks of this path by exactly one, create one.
 func (m *Master) RPCGetChunkHandle(args gfs.GetChunkHandleArg, reply *gfs.GetChunkHandleReply) error {
-	handle, err := m.cm.GetChunk(args.Path, args.Index)
+	info, err := m.nm.GetPathInfo(args.Path)
+	if info.IsDir {
+		return fmt.Errorf("%v is a directory", args.Path)
+	}
 	if err != nil {
 		return err
 	}
-	reply.Handle = handle
+	if args.Index >= gfs.ChunkIndex(info.Chunks) {
+		return fmt.Errorf("index %v is out of range", args.Index)
+	}
+	if args.Index == gfs.ChunkIndex(info.Chunks) {
+		// create new chunk
+		addrs, err := m.csm.ChooseServers(gfs.DefaultNumReplicas)
+		if err != nil {
+			return err
+		}
+		handle, err := m.cm.CreateChunk(args.Path, addrs)
+		if err != nil {
+			return err
+		}
+		err = m.csm.AddChunk(addrs, handle)
+		if err != nil {
+			return err
+		}
+		reply.Handle = handle
+	} else {
+		handle, err := m.cm.GetChunk(args.Path, args.Index)
+		if err != nil {
+			return err
+		}
+		reply.Handle = handle
+	}
 	return nil
 }

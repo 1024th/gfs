@@ -10,7 +10,6 @@ import (
 
 	"fmt"
 	"io"
-	"io/ioutil"
 
 	log "github.com/sirupsen/logrus"
 
@@ -781,7 +780,7 @@ func TestDiskError(t *testing.T) {
 func TestMain(tm *testing.M) {
 	// create temporary directory
 	var err error
-	root, err = ioutil.TempDir("", "gfs-")
+	root, err = os.MkdirTemp("", "gfs-")
 	if err != nil {
 		log.Fatal("cannot create temporary directory: ", err)
 	}

@@ -27,6 +27,13 @@ type DataBufferID struct {
 	TimeStamp int64
 }
 
+// allocate a new DataID for given handle
+func NewDataID(handle ChunkHandle) DataBufferID {
+	now := time.Now()
+	timeStamp := now.UnixNano()
+	return DataBufferID{Handle: handle, TimeStamp: timeStamp}
+}
+
 type PathInfo struct {
 	Name string
 
