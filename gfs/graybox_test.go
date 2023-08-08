@@ -12,6 +12,7 @@ import (
 	"io"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
 
 	//"math/rand"
 	"os"
@@ -37,142 +38,123 @@ const (
 	N     = 10
 )
 
-func errorAll(ch chan error, n int, t *testing.T) {
-	for i := 0; i < n; i++ {
-		if err := <-ch; err != nil {
-			t.Error(err)
-		}
-	}
-}
-
 /*
  *  TEST SUITE 1 - Basic File Operation
  */
+
 func TestCreateFile(t *testing.T) {
-	err := m.RPCCreateFile(gfs.CreateFileArg{"/test1.txt"}, &gfs.CreateFileReply{})
-	if err != nil {
-		t.Error(err)
+	assert := assert.New(t)
+	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/test1.txt"}, nil))
+	assert.NotNil(
+		m.RPCCreateFile(gfs.CreateFileArg{"/test1.txt"}, nil),
+		"The same file has been created twice.")
+}
+
+// toStringSet converts a list of objects to a set of strings.
+// If there are duplicated strings in the list, it returns false.
+func toStringSet[T any](l []T, fn func(T) string) (s map[string]bool, ok bool) {
+	s = make(map[string]bool)
+	for _, t := range l {
+		v := fn(t)
+		if _, ok := s[v]; ok {
+			return nil, false
+		}
+		s[v] = true
 	}
-	err = m.RPCCreateFile(gfs.CreateFileArg{"/test1.txt"}, &gfs.CreateFileReply{})
-	if err == nil {
-		t.Error("the same file has been created twice")
-	}
+	return s, true
 }
 
 func TestMkdirDeleteList(t *testing.T) {
-	ch := make(chan error, 9)
-	ch <- m.RPCMkdir(gfs.MkdirArg{"/dir1"}, &gfs.MkdirReply{})
-	ch <- m.RPCMkdir(gfs.MkdirArg{"/dir2"}, &gfs.MkdirReply{})
-	ch <- m.RPCCreateFile(gfs.CreateFileArg{"/file1.txt"}, &gfs.CreateFileReply{})
-	ch <- m.RPCCreateFile(gfs.CreateFileArg{"/file2.txt"}, &gfs.CreateFileReply{})
-	ch <- m.RPCCreateFile(gfs.CreateFileArg{"/dir1/file3.txt"}, &gfs.CreateFileReply{})
-	ch <- m.RPCCreateFile(gfs.CreateFileArg{"/dir1/file4.txt"}, &gfs.CreateFileReply{})
-	ch <- m.RPCCreateFile(gfs.CreateFileArg{"/dir2/file5.txt"}, &gfs.CreateFileReply{})
+	assert := assert.New(t)
+	assert.Nil(m.RPCMkdir(gfs.MkdirArg{"/dir1"}, nil))
+	assert.Nil(m.RPCMkdir(gfs.MkdirArg{"/dir2"}, nil))
+	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/file1.txt"}, nil))
+	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/file2.txt"}, nil))
+	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/dir1/file3.txt"}, nil))
+	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/dir1/file4.txt"}, nil))
+	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/dir2/file5.txt"}, nil))
 
-	err := m.RPCCreateFile(gfs.CreateFileArg{"/dir2/file5.txt"}, &gfs.CreateFileReply{})
-	if err == nil {
-		t.Error("the same file has been created twice")
-	}
+	assert.NotNil(
+		m.RPCCreateFile(gfs.CreateFileArg{"/dir2/file5.txt"}, nil),
+		"The same file has been created twice.")
 
-	err = m.RPCMkdir(gfs.MkdirArg{"/dir1"}, &gfs.MkdirReply{})
-	if err == nil {
-		t.Error("the same dirctory has been created twice")
-	}
-
-	todelete := make(map[string]bool)
-	todelete["dir1"] = true
-	todelete["dir2"] = true
-	todelete["file1.txt"] = true
-	todelete["file2.txt"] = true
+	assert.NotNil(m.RPCMkdir(gfs.MkdirArg{"/dir1"}, nil),
+		"The same dirctory has been created twice.")
 
 	var l gfs.ListReply
-	ch <- m.RPCList(gfs.ListArg{"/"}, &l)
-	for _, v := range l.Files {
-		delete(todelete, v.Name)
+	assert.Nil(m.RPCList(gfs.ListArg{"/"}, &l))
+	fn := func(p gfs.PathInfo) string { return p.Name }
+	got, ok := toStringSet(l.Files, fn)
+	assert.True(ok)
+	want := map[string]bool{
+		"dir1": true, "dir2": true, "file1.txt": true, "file2.txt": true,
 	}
-	if len(todelete) != 0 {
-		t.Error("error in list root path, get", l.Files)
-	}
+	assert.Equal(got, want, "Error in list root path.")
 
-	todelete["file3.txt"] = true
-	todelete["file4.txt"] = true
-	ch <- m.RPCList(gfs.ListArg{"/dir1"}, &l)
-	for _, v := range l.Files {
-		delete(todelete, v.Name)
+	assert.Nil(m.RPCList(gfs.ListArg{"/dir1"}, &l))
+	got, ok = toStringSet(l.Files, fn)
+	assert.True(ok)
+	want = map[string]bool{
+		"file3.txt": true, "file4.txt": true,
 	}
-	if len(todelete) != 0 {
-		t.Error("error in list root path, get", l.Files)
-	}
-
-	errorAll(ch, 9, t)
+	assert.Equal(got, want, "Error in list /dir1.")
 }
 
 func TestRPCGetChunkHandle(t *testing.T) {
-	var r1, r2 gfs.GetChunkHandleReply
+	assert := assert.New(t)
 	path := gfs.Path("/test1.txt")
-	err := m.RPCGetChunkHandle(gfs.GetChunkHandleArg{path, 0}, &r1)
-	if err != nil {
-		t.Error(err)
-	}
-	err = m.RPCGetChunkHandle(gfs.GetChunkHandleArg{path, 0}, &r2)
-	if err != nil {
-		t.Error(err)
-	}
-	if r1.Handle != r2.Handle {
-		t.Errorf("got different handle: %v and %v", r1.Handle, r2.Handle)
-	}
+	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{Path: path}, nil))
 
-	err = m.RPCGetChunkHandle(gfs.GetChunkHandleArg{path, 2}, &r2)
-	if err == nil {
-		t.Error("discontinuous chunk should not be created")
-	}
+	var r1, r2 gfs.GetChunkHandleReply
+	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{path, 0}, &r1))
+	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{path, 0}, &r2))
+	assert.Equal(r1.Handle, r2.Handle,
+		"Got two different handles of the same chunk.")
+
+	assert.NotNil(
+		m.RPCGetChunkHandle(gfs.GetChunkHandleArg{path, 2}, &r2),
+		"Discontinuous chunk should not be created.")
 }
 
 func TestWriteChunk(t *testing.T) {
+	assert := assert.New(t)
 	var r1 gfs.GetChunkHandleReply
 	p := gfs.Path("/TestWriteChunk.txt")
-	ch := make(chan error, N+2)
-	ch <- m.RPCCreateFile(gfs.CreateFileArg{p}, &gfs.CreateFileReply{})
-	ch <- m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1)
+	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{p}, nil))
+	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1))
 	for i := 0; i < N; i++ {
 		go func(x int) {
-			ch <- c.WriteChunk(r1.Handle, gfs.Offset(x*2), []byte(fmt.Sprintf("%2d", x)))
+			assert.Nil(c.WriteChunk(r1.Handle, gfs.Offset(x*2), []byte(fmt.Sprintf("%2d", x))))
 		}(i)
 	}
-	errorAll(ch, N+2, t)
 }
 
 func TestReadChunk(t *testing.T) {
+	assert := assert.New(t)
+	TestWriteChunk(t)
 	var r1 gfs.GetChunkHandleReply
 	p := gfs.Path("/TestWriteChunk.txt")
-	ch := make(chan error, N+1)
-	ch <- m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1)
+	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1))
 	for i := 0; i < N; i++ {
 		go func(x int) {
 			buf := make([]byte, 2)
 			n, err := c.ReadChunk(r1.Handle, gfs.Offset(x*2), buf)
-			ch <- err
+			assert.Nil(err)
+			assert.Equal(n, 2)
 			expected := []byte(fmt.Sprintf("%2d", x))
-			if n != 2 {
-				t.Error("should read exactly 2 bytes but", n, "instead")
-			} else if !reflect.DeepEqual(expected, buf) {
-				t.Error("expected (", expected, ") != buf (", buf, ")")
-			}
+			assert.Equal(expected, buf)
 		}(i)
 	}
-	errorAll(ch, N+1, t)
 }
 
 // check if the content of replicas are the same, returns the number of replicas
 func checkReplicas(handle gfs.ChunkHandle, length int, t *testing.T) int {
+	assert := assert.New(t)
 	var data [][]byte
 
 	// get replicas location from master
 	var l gfs.GetReplicasReply
-	err := m.RPCGetReplicas(gfs.GetReplicasArg{handle}, &l)
-	if err != nil {
-		t.Error(err)
-	}
+	assert.Nil(m.RPCGetReplicas(gfs.GetReplicasArg{handle}, &l))
 
 	// read
 	args := gfs.ReadChunkArg{handle, 0, length}
@@ -187,32 +169,31 @@ func checkReplicas(handle gfs.ChunkHandle, length int, t *testing.T) int {
 
 	// check equality
 	for i := 1; i < len(data); i++ {
-		if !reflect.DeepEqual(data[0], data[i]) {
-			t.Error("replicas are different. ", data[0], "vs", data[i])
-		}
+		assert.Equal(data[0], data[i], "Replicas are different.")
 	}
 
 	return len(data)
 }
 
 func TestReplicaEquality(t *testing.T) {
+	assert := assert.New(t)
+	TestWriteChunk(t)
 	var r1 gfs.GetChunkHandleReply
 	var data [][]byte
 	p := gfs.Path("/TestWriteChunk.txt")
-	m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1)
+	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1))
 
 	n := checkReplicas(r1.Handle, N*2, t)
-	if n != gfs.DefaultNumReplicas {
-		t.Error("expect", gfs.DefaultNumReplicas, "replicas, got only", len(data))
-	}
+	assert.Equal(n, gfs.DefaultNumReplicas,
+		"expect %v replicas, got %v", gfs.DefaultNumReplicas, len(data))
 }
 
 func TestAppendChunk(t *testing.T) {
+	assert := assert.New(t)
 	var r1 gfs.GetChunkHandleReply
 	p := gfs.Path("/TestAppendChunk.txt")
-	ch := make(chan error, 2*N+2)
-	ch <- m.RPCCreateFile(gfs.CreateFileArg{p}, &gfs.CreateFileReply{})
-	ch <- m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1)
+	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{p}, nil))
+	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1))
 	expected := make(map[int][]byte)
 	for i := 0; i < N; i++ {
 		expected[i] = []byte(fmt.Sprintf("%3d", i))
@@ -223,7 +204,7 @@ func TestAppendChunk(t *testing.T) {
 	for i := 0; i < N; i++ {
 		go func(x int) {
 			_, err := c.AppendChunk(r1.Handle, expected[x])
-			ch <- err
+			assert.Nil(err)
 			wg.Done()
 		}(i)
 	}
@@ -234,10 +215,9 @@ func TestAppendChunk(t *testing.T) {
 	for x := 0; x < N; x++ {
 		buf := make([]byte, 3)
 		n, err := c.ReadChunk(r1.Handle, gfs.Offset(x*3), buf)
-		ch <- err
-		if n != 3 {
-			t.Error("should read exactly 2 bytes but", n, "instead")
-		}
+		assert.Nil(err)
+		assert.Equal(n, 3, "should read exactly 3 bytes")
+
 		key := -1
 		for k, v := range expected {
 			if reflect.DeepEqual(buf, v) {
@@ -245,18 +225,12 @@ func TestAppendChunk(t *testing.T) {
 				break
 			}
 		}
-		if key == -1 {
-			t.Error("incorrect data", buf)
-		} else {
-			delete(expected, key)
-		}
+		assert.NotEqual(key, -1, "incorrect data", buf)
+
+		delete(expected, key)
 	}
 
-	if len(expected) != 0 {
-		t.Error("incorrect data")
-	}
-
-	errorAll(ch, 2*N+2, t)
+	assert.Equal(len(expected), 0, "incorrect data")
 }
 
 /*
@@ -266,10 +240,10 @@ func TestAppendChunk(t *testing.T) {
 // if the append would cause the chunk to exceed the maximum size
 // this chunk should be pad and the data should be appended to the next chunk
 func TestPadOver(t *testing.T) {
+	assert := assert.New(t)
 	p := gfs.Path("/appendover.txt")
 
-	ch := make(chan error, 6)
-	ch <- c.Create(p)
+	assert.Nil(c.Create(p))
 
 	bound := gfs.MaxAppendSize - 1
 	buf := make([]byte, bound)
@@ -279,26 +253,22 @@ func TestPadOver(t *testing.T) {
 
 	for i := 0; i < 4; i++ {
 		_, err := c.Append(p, buf)
-		ch <- err
+		assert.Nil(err)
 	}
 
 	buf = buf[:5]
 	// an append cause pad, and client should retry to next chunk
 	offset, err := c.Append(p, buf)
-	ch <- err
-	if offset != gfs.MaxChunkSize { // i.e. 0 at next chunk
-		t.Error("data should be appended to the beginning of next chunk")
-	}
-
-	errorAll(ch, 6, t)
+	assert.Nil(err)
+	assert.Equal(offset, gfs.MaxChunkSize, "should append to next chunk")
 }
 
 // big data that invokes several chunks
 func TestWriteReadBigData(t *testing.T) {
+	assert := assert.New(t)
 	p := gfs.Path("/bigData.txt")
 
-	ch := make(chan error, 4)
-	ch <- c.Create(p)
+	assert.Nil(c.Create(p))
 
 	size := gfs.MaxChunkSize * 3
 	expected := make([]byte, size)
@@ -307,36 +277,25 @@ func TestWriteReadBigData(t *testing.T) {
 	}
 
 	// write large data
-	ch <- c.Write(p, gfs.MaxChunkSize/2, expected)
+	assert.Nil(c.Write(p, gfs.MaxChunkSize/2, expected))
 
 	// read
 	buf := make([]byte, size)
 	n, err := c.Read(p, gfs.MaxChunkSize/2, buf)
-	ch <- err
-
-	if n != size {
-		t.Error("read counter is wrong")
-	}
-	if !reflect.DeepEqual(expected, buf) {
-		t.Error("read wrong data")
-	}
+	assert.Nil(err)
+	assert.Equal(n, size, "should read exactly %v bytes", size)
+	assert.Equal(expected, buf, "read wrong data")
 
 	// test read at EOF
-	n, err = c.Read(p, gfs.MaxChunkSize/2+gfs.Offset(size), buf)
-	if err == nil {
-		t.Error("an error should be returned if read at EOF")
-	}
+	_, err = c.Read(p, gfs.MaxChunkSize/2+gfs.Offset(size), buf)
+	assert.NotNil(err, "should return error if read at EOF")
 
 	// test append offset
 	var offset gfs.Offset
 	buf = buf[:gfs.MaxAppendSize-1]
 	offset, err = c.Append(p, buf)
-	if offset != gfs.MaxChunkSize/2+gfs.Offset(size) {
-		t.Error("append in wrong offset")
-	}
-	ch <- err
-
-	errorAll(ch, 4, t)
+	assert.Nil(err)
+	assert.Equal(offset, gfs.MaxChunkSize/2+gfs.Offset(size), "append in wrong offset")
 }
 
 type Counter struct {
@@ -353,6 +312,7 @@ func (ct *Counter) Next() int {
 
 // a concurrent producer-consumer number collector for testing race contiditon
 func TestComprehensiveOperation(t *testing.T) {
+	assert := assert.New(t)
 	createTick := 100 * time.Millisecond
 
 	done := make(chan struct{})
@@ -402,12 +362,8 @@ func TestComprehensiveOperation(t *testing.T) {
 					p := gfs.Path(fmt.Sprintf("/haha%v.txt", x))
 
 					//fmt.Println("create ", p)
-					err := c.Create(p)
-					if err != nil {
-						t.Error(err)
-					} else {
-						line[0] <- p
-					}
+					assert.Nil(c.Create(p))
+					line[0] <- p
 				}
 			}
 			wg0.Done()
@@ -430,9 +386,7 @@ func TestComprehensiveOperation(t *testing.T) {
 
 				//fmt.Println("append ", p, "  ", tmp)
 				_, err := c.Append(p, []byte(fmt.Sprintf("%10d,", x)))
-				if err != nil {
-					t.Error(err)
-				}
+				assert.Nil(err)
 
 				line[1] <- p
 				line[2] <- p
@@ -460,9 +414,8 @@ func TestComprehensiveOperation(t *testing.T) {
 				lock2.RUnlock()
 				buf := make([]byte, 10000) // large enough
 				n, err := c.Read(p, gfs.Offset(pos), buf)
-				if err != nil && err != io.EOF {
-					t.Error(err)
-				}
+				assert.True(err == nil || err == io.EOF)
+
 				if n == 0 {
 					continue
 				}
@@ -472,9 +425,7 @@ func TestComprehensiveOperation(t *testing.T) {
 				lock2.Lock()
 				for _, v := range strings.Split(string(buf), ",") {
 					i, err := strconv.Atoi(strings.TrimSpace(v))
-					if err != nil {
-						t.Error(err)
-					}
+					assert.Nil(err)
 					receiveData[i]++
 				}
 				if pos+n > fileOffset[p] {
@@ -500,9 +451,7 @@ func TestComprehensiveOperation(t *testing.T) {
 	// check correctness
 	total := sendCt.Next() - 1
 	for i := 0; i < total; i++ {
-		if receiveData[i] < 1 {
-			t.Errorf("error occured in sending data %v", i)
-		}
+		assert.True(receiveData[i] >= 1, "error occured in sending data %v", i)
 	}
 	fmt.Printf("##### You send %v numbers in total\n", total)
 }
@@ -513,9 +462,9 @@ func TestComprehensiveOperation(t *testing.T) {
 
 // Shutdown two chunk servers during appending
 func TestShutdownInAppend(t *testing.T) {
+	assert := assert.New(t)
 	p := gfs.Path("/shutdown.txt")
-	ch := make(chan error, N+3)
-	ch <- c.Create(p)
+	assert.Nil(c.Create(p))
 
 	expected := make(map[int][]byte)
 	todelete := make(map[int][]byte)
@@ -526,14 +475,14 @@ func TestShutdownInAppend(t *testing.T) {
 
 	// get two replica locations
 	var r1 gfs.GetChunkHandleReply
-	ch <- m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1)
+	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1))
 	var l gfs.GetReplicasReply
-	ch <- m.RPCGetReplicas(gfs.GetReplicasArg{r1.Handle}, &l)
+	assert.Nil(m.RPCGetReplicas(gfs.GetReplicasArg{r1.Handle}, &l))
 
 	for i := 0; i < N; i++ {
 		go func(x int) {
 			_, err := c.Append(p, expected[x])
-			ch <- err
+			assert.Nil(err)
 		}(i)
 	}
 
@@ -545,19 +494,13 @@ func TestShutdownInAppend(t *testing.T) {
 		}
 	}
 
-	errorAll(ch, N+3, t)
-
 	// check correctness, append at least once
 	// TODO : stricter - check replicas
 	for x := 0; x < gfs.MaxChunkSize/2 && len(todelete) > 0; x++ {
 		buf := make([]byte, 2)
 		n, err := c.Read(p, gfs.Offset(x*2), buf)
-		if err != nil {
-			t.Error("read error ", err)
-		}
-		if n != 2 {
-			t.Error("should read exactly 2 bytes but", n, "instead")
-		}
+		assert.Nil(err, "read error")
+		assert.Equal(n, 2, "should read exactly 2 bytes")
 
 		key := -1
 		for k, v := range expected {
@@ -566,18 +509,14 @@ func TestShutdownInAppend(t *testing.T) {
 				break
 			}
 		}
-		if key == -1 {
-			t.Error("incorrect data", buf)
-		} else {
-			delete(todelete, key)
-		}
+		assert.NotEqual(key, -1, "incorrect data", buf)
+
+		delete(todelete, key)
 	}
-	if len(todelete) != 0 {
-		t.Errorf("missing data %v", todelete)
-	}
+	assert.Equal(len(todelete), 0, "missing data %v", todelete)
 
 	// restart
-	for i, _ := range cs {
+	for i := range cs {
 		if csAdd[i] == l.Locations[0] || csAdd[i] == l.Locations[1] {
 			ii := strconv.Itoa(i)
 			cs[i] = chunkserver.NewAndServe(csAdd[i], mAdd, path.Join(root, "cs"+ii))
@@ -587,10 +526,10 @@ func TestShutdownInAppend(t *testing.T) {
 
 // Shutdown all servers in turns. You should perform re-replication well
 func TestReReplication(t *testing.T) {
+	assert := assert.New(t)
 	p := gfs.Path("/re-replication.txt")
 
-	ch := make(chan error, 2)
-	ch <- c.Create(p)
+	assert.Nil(c.Create(p))
 
 	c.Append(p, []byte("Dangerous"))
 
@@ -622,64 +561,55 @@ func TestReReplication(t *testing.T) {
 
 	// check equality and number of replicas
 	var r1 gfs.GetChunkHandleReply
-	ch <- m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1)
+	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1))
 	n := checkReplicas(r1.Handle, N*2, t)
 
-	if n < gfs.MinimumNumReplicas {
-		t.Errorf("Cannot perform replicas promptly, only get %v replicas", n)
-	} else {
-		fmt.Printf("###### Well done, you save %v replicas during disaster\n", n)
-	}
+	assert.True(n >= gfs.MinimumNumReplicas,
+		"Cannot perform replicas promptly, only get %v replicas", n)
 
-	errorAll(ch, 2, t)
+	fmt.Printf("###### Well done, you save %v replicas during disaster\n", n)
 }
 
 // some file operations to check if the server is still working
 func checkWork(p gfs.Path, msg []byte, t *testing.T) {
-	ch := make(chan error, 6)
+	assert := assert.New(t)
 
 	// append again to confirm all information about this chunk has been reloaded properly
 	offset, err := c.Append(p, msg)
-	ch <- err
+	assert.Nil(err)
 
 	// read and check data
 	buf := make([]byte, len(msg)*2)
 	// read at defined region
 	_, err = c.Read(p, offset-gfs.Offset(len(msg)), buf)
-	ch <- err
+	assert.Nil(err)
 
 	msg = append(msg, msg...)
-	if !reflect.DeepEqual(buf, msg) {
-		t.Errorf("[check 1]read wrong data \"%v\", expect \"%v\"", string(buf), string(msg))
-	}
+	assert.Equal(buf, msg, "read wrong data")
 
 	// other file operation
-	ch <- c.Mkdir(gfs.Path("/" + string(msg)))
+	assert.Nil(c.Mkdir(gfs.Path("/" + string(msg))))
 	newfile := gfs.Path("/" + string(msg) + "/" + string(msg) + ".txt")
-	ch <- c.Create(newfile)
-	ch <- c.Write(newfile, 4, msg)
+	assert.Nil(c.Create(newfile))
+	assert.Nil(c.Write(newfile, 4, msg))
 
 	// read and check data again
 	buf = make([]byte, len(msg))
 	_, err = c.Read(p, 0, buf)
-	ch <- err
-	if !reflect.DeepEqual(buf, msg) {
-		t.Errorf("[check 2]read wrong data \"%v\", expect \"%v\"", string(buf), string(msg))
-	}
-
-	errorAll(ch, 6, t)
+	assert.Nil(err)
+	assert.Equal(buf, msg, "read wrong data")
 }
 
 // Shutdown all chunk servers. You must store the meta data of chunkserver persistently
 func TestPersistentChunkServer(t *testing.T) {
+	assert := assert.New(t)
 	p := gfs.Path("/persistent-chunkserver.txt")
 	msg := []byte("Don't Lose Me. ")
 
-	ch := make(chan error, 4)
-	ch <- c.Create(p)
+	assert.Nil(c.Create(p))
 
 	_, err := c.Append(p, msg)
-	ch <- err
+	assert.Nil(err)
 
 	// shut all down
 	fmt.Println("###### SHUT All DOWN")
@@ -699,21 +629,19 @@ func TestPersistentChunkServer(t *testing.T) {
 
 	// check recovery
 	checkWork(p, msg, t)
-
-	errorAll(ch, 2, t)
 }
 
 // Shutdown master. You must store the meta data of master persistently
 func TestPersistentMaster(t *testing.T) {
+	assert := assert.New(t)
 	p := gfs.Path("/persistent/master.txt")
 	msg := []byte("Don't Lose Yourself. ")
 
-	ch := make(chan error, 5)
-	ch <- c.Mkdir("/persistent")
-	ch <- c.Create(p)
+	assert.Nil(c.Mkdir("/persistent"))
+	assert.Nil(c.Create(p))
 
 	_, err := c.Append(p, msg)
-	ch <- err
+	assert.Nil(err)
 
 	// shut master down
 	fmt.Println("###### Shutdown Master")
@@ -726,26 +654,24 @@ func TestPersistentMaster(t *testing.T) {
 
 	// check recovery
 	checkWork(p, msg, t)
-
-	errorAll(ch, 3, t)
 }
 
 // delete all files in two chunkservers ...
 func TestDiskError(t *testing.T) {
+	assert := assert.New(t)
 	p := gfs.Path("/virus.die")
 	msg := []byte("fucking disk!")
 
-	ch := make(chan error, 5)
-	ch <- c.Create(p)
+	assert.Nil(c.Create(p))
 
 	_, err := c.Append(p, msg)
-	ch <- err
+	assert.Nil(err)
 
 	// get replica locations
 	var r1 gfs.GetChunkHandleReply
-	ch <- m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1)
+	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1))
 	var l gfs.GetReplicasReply
-	ch <- m.RPCGetReplicas(gfs.GetReplicasArg{r1.Handle}, &l)
+	assert.Nil(m.RPCGetReplicas(gfs.GetReplicasArg{r1.Handle}, &l))
 
 	fmt.Println("###### Destory two chunkserver's diskes")
 	// destory two server's disk
@@ -760,15 +686,13 @@ func TestDiskError(t *testing.T) {
 	time.Sleep(gfs.ServerTimeout + gfs.LeaseExpire)
 
 	_, err = c.Append(p, msg)
-	ch <- err
+	assert.Nil(err)
 
 	time.Sleep(gfs.ServerTimeout + gfs.LeaseExpire)
 
 	// TODO: check re-replication
 	// check recovery
 	checkWork(p, msg, t)
-
-	errorAll(ch, 5, t)
 }
 
 /*
