@@ -42,12 +42,63 @@ const (
  *  TEST SUITE 1 - Basic File Operation
  */
 
-func TestCreateFile(t *testing.T) {
+func TestFileDir(t *testing.T) {
 	assert := assert.New(t)
+
+	// Test CreateFile
 	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/test1.txt"}, nil))
 	assert.NotNil(
 		m.RPCCreateFile(gfs.CreateFileArg{"/test1.txt"}, nil),
 		"The same file has been created twice.")
+
+	// Test Mkdir
+	assert.Nil(m.RPCMkdir(gfs.MkdirArg{"/dir1"}, nil))
+	assert.Nil(m.RPCMkdir(gfs.MkdirArg{"/dir2"}, nil))
+	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/file1.txt"}, nil))
+	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/file2.txt"}, nil))
+	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/dir1/file3.txt"}, nil))
+	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/dir1/file4.txt"}, nil))
+	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/dir2/file5.txt"}, nil))
+
+	assert.NotNil(
+		m.RPCCreateFile(gfs.CreateFileArg{"/dir2/file5.txt"}, nil),
+		"The same file has been created twice.")
+
+	assert.NotNil(m.RPCMkdir(gfs.MkdirArg{"/dir1"}, nil),
+		"The same dirctory has been created twice.")
+
+	// Test List
+	var l gfs.ListReply
+	assert.Nil(m.RPCList(gfs.ListArg{"/"}, &l))
+	fn := func(p gfs.PathInfo) string { return p.Name }
+	got, ok := toStringSet(l.Files, fn)
+	assert.True(ok)
+	want := map[string]bool{
+		"test1.txt": true,
+		"dir1":      true, "dir2": true, "file1.txt": true, "file2.txt": true,
+	}
+	assert.Equal(want, got, "Error in list root path.")
+
+	assert.Nil(m.RPCList(gfs.ListArg{"/dir1"}, &l))
+	got, ok = toStringSet(l.Files, fn)
+	assert.True(ok)
+	want = map[string]bool{
+		"file3.txt": true, "file4.txt": true,
+	}
+	assert.Equal(want, got, "Error in list /dir1.")
+
+	// Test GetChunkHandle
+	path := gfs.Path("/test1.txt")
+
+	var r1, r2 gfs.GetChunkHandleReply
+	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{path, 0}, &r1))
+	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{path, 0}, &r2))
+	assert.Equal(r1.Handle, r2.Handle,
+		"Got two different handles of the same chunk.")
+
+	assert.NotNil(
+		m.RPCGetChunkHandle(gfs.GetChunkHandleArg{path, 2}, &r2),
+		"Discontinuous chunk should not be created.")
 }
 
 // toStringSet converts a list of objects to a set of strings.
@@ -64,87 +115,48 @@ func toStringSet[T any](l []T, fn func(T) string) (s map[string]bool, ok bool) {
 	return s, true
 }
 
-func TestMkdirDeleteList(t *testing.T) {
+func TestWriteReadChunk(t *testing.T) {
 	assert := assert.New(t)
-	assert.Nil(m.RPCMkdir(gfs.MkdirArg{"/dir1"}, nil))
-	assert.Nil(m.RPCMkdir(gfs.MkdirArg{"/dir2"}, nil))
-	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/file1.txt"}, nil))
-	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/file2.txt"}, nil))
-	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/dir1/file3.txt"}, nil))
-	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/dir1/file4.txt"}, nil))
-	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{"/dir2/file5.txt"}, nil))
 
-	assert.NotNil(
-		m.RPCCreateFile(gfs.CreateFileArg{"/dir2/file5.txt"}, nil),
-		"The same file has been created twice.")
-
-	assert.NotNil(m.RPCMkdir(gfs.MkdirArg{"/dir1"}, nil),
-		"The same dirctory has been created twice.")
-
-	var l gfs.ListReply
-	assert.Nil(m.RPCList(gfs.ListArg{"/"}, &l))
-	fn := func(p gfs.PathInfo) string { return p.Name }
-	got, ok := toStringSet(l.Files, fn)
-	assert.True(ok)
-	want := map[string]bool{
-		"dir1": true, "dir2": true, "file1.txt": true, "file2.txt": true,
-	}
-	assert.Equal(got, want, "Error in list root path.")
-
-	assert.Nil(m.RPCList(gfs.ListArg{"/dir1"}, &l))
-	got, ok = toStringSet(l.Files, fn)
-	assert.True(ok)
-	want = map[string]bool{
-		"file3.txt": true, "file4.txt": true,
-	}
-	assert.Equal(got, want, "Error in list /dir1.")
-}
-
-func TestRPCGetChunkHandle(t *testing.T) {
-	assert := assert.New(t)
-	path := gfs.Path("/test1.txt")
-	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{Path: path}, nil))
-
-	var r1, r2 gfs.GetChunkHandleReply
-	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{path, 0}, &r1))
-	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{path, 0}, &r2))
-	assert.Equal(r1.Handle, r2.Handle,
-		"Got two different handles of the same chunk.")
-
-	assert.NotNil(
-		m.RPCGetChunkHandle(gfs.GetChunkHandleArg{path, 2}, &r2),
-		"Discontinuous chunk should not be created.")
-}
-
-func TestWriteChunk(t *testing.T) {
-	assert := assert.New(t)
+	// Test WriteChunk
 	var r1 gfs.GetChunkHandleReply
 	p := gfs.Path("/TestWriteChunk.txt")
 	assert.Nil(m.RPCCreateFile(gfs.CreateFileArg{p}, nil))
 	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1))
+	wg := sync.WaitGroup{}
+	wg.Add(N)
 	for i := 0; i < N; i++ {
 		go func(x int) {
-			assert.Nil(c.WriteChunk(r1.Handle, gfs.Offset(x*2), []byte(fmt.Sprintf("%2d", x))))
+			err := c.WriteChunk(r1.Handle, gfs.Offset(x*2), []byte(fmt.Sprintf("%2d", x)))
+			assert.Nil(err)
+			wg.Done()
 		}(i)
 	}
-}
+	wg.Wait()
 
-func TestReadChunk(t *testing.T) {
-	assert := assert.New(t)
-	TestWriteChunk(t)
-	var r1 gfs.GetChunkHandleReply
-	p := gfs.Path("/TestWriteChunk.txt")
+	// Test ReadChunk
 	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1))
+	wg.Add(N)
 	for i := 0; i < N; i++ {
 		go func(x int) {
 			buf := make([]byte, 2)
 			n, err := c.ReadChunk(r1.Handle, gfs.Offset(x*2), buf)
 			assert.Nil(err)
-			assert.Equal(n, 2)
+			assert.Equal(2, n)
 			expected := []byte(fmt.Sprintf("%2d", x))
 			assert.Equal(expected, buf)
+			wg.Done()
 		}(i)
 	}
+	wg.Wait()
+
+	// Test Replica Equality
+	var data [][]byte
+	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1))
+
+	n := checkReplicas(r1.Handle, N*2, t)
+	assert.Equal(gfs.DefaultNumReplicas, n,
+		"expect %v replicas, got %v", gfs.DefaultNumReplicas, len(data))
 }
 
 // check if the content of replicas are the same, returns the number of replicas
@@ -155,6 +167,7 @@ func checkReplicas(handle gfs.ChunkHandle, length int, t *testing.T) int {
 	// get replicas location from master
 	var l gfs.GetReplicasReply
 	assert.Nil(m.RPCGetReplicas(gfs.GetReplicasArg{handle}, &l))
+	log.Info("Replicas: ", l.Locations)
 
 	// read
 	args := gfs.ReadChunkArg{handle, 0, length}
@@ -164,6 +177,8 @@ func checkReplicas(handle gfs.ChunkHandle, length int, t *testing.T) int {
 		if err == nil {
 			data = append(data, r.Data)
 			//fmt.Println("find in ", addr)
+		} else {
+			fmt.Println("not find in ", addr, " error: ", err)
 		}
 	}
 
@@ -173,19 +188,6 @@ func checkReplicas(handle gfs.ChunkHandle, length int, t *testing.T) int {
 	}
 
 	return len(data)
-}
-
-func TestReplicaEquality(t *testing.T) {
-	assert := assert.New(t)
-	TestWriteChunk(t)
-	var r1 gfs.GetChunkHandleReply
-	var data [][]byte
-	p := gfs.Path("/TestWriteChunk.txt")
-	assert.Nil(m.RPCGetChunkHandle(gfs.GetChunkHandleArg{p, 0}, &r1))
-
-	n := checkReplicas(r1.Handle, N*2, t)
-	assert.Equal(n, gfs.DefaultNumReplicas,
-		"expect %v replicas, got %v", gfs.DefaultNumReplicas, len(data))
 }
 
 func TestAppendChunk(t *testing.T) {
@@ -216,7 +218,7 @@ func TestAppendChunk(t *testing.T) {
 		buf := make([]byte, 3)
 		n, err := c.ReadChunk(r1.Handle, gfs.Offset(x*3), buf)
 		assert.Nil(err)
-		assert.Equal(n, 3, "should read exactly 3 bytes")
+		assert.Equal(3, n, "should read exactly 3 bytes")
 
 		key := -1
 		for k, v := range expected {
@@ -230,7 +232,7 @@ func TestAppendChunk(t *testing.T) {
 		delete(expected, key)
 	}
 
-	assert.Equal(len(expected), 0, "incorrect data")
+	assert.Equal(0, len(expected), "incorrect data")
 }
 
 /*
@@ -260,7 +262,7 @@ func TestPadOver(t *testing.T) {
 	// an append cause pad, and client should retry to next chunk
 	offset, err := c.Append(p, buf)
 	assert.Nil(err)
-	assert.Equal(offset, gfs.MaxChunkSize, "should append to next chunk")
+	assert.Equal(gfs.MaxChunkSize, offset, "should append to next chunk")
 }
 
 // big data that invokes several chunks
@@ -283,7 +285,7 @@ func TestWriteReadBigData(t *testing.T) {
 	buf := make([]byte, size)
 	n, err := c.Read(p, gfs.MaxChunkSize/2, buf)
 	assert.Nil(err)
-	assert.Equal(n, size, "should read exactly %v bytes", size)
+	assert.Equal(size, n, "should read exactly %v bytes", size)
 	assert.Equal(expected, buf, "read wrong data")
 
 	// test read at EOF
@@ -295,7 +297,7 @@ func TestWriteReadBigData(t *testing.T) {
 	buf = buf[:gfs.MaxAppendSize-1]
 	offset, err = c.Append(p, buf)
 	assert.Nil(err)
-	assert.Equal(offset, gfs.MaxChunkSize/2+gfs.Offset(size), "append in wrong offset")
+	assert.Equal(gfs.MaxChunkSize/2+gfs.Offset(size), offset, "append in wrong offset")
 }
 
 type Counter struct {
@@ -500,7 +502,7 @@ func TestShutdownInAppend(t *testing.T) {
 		buf := make([]byte, 2)
 		n, err := c.Read(p, gfs.Offset(x*2), buf)
 		assert.Nil(err, "read error")
-		assert.Equal(n, 2, "should read exactly 2 bytes")
+		assert.Equal(2, n, "should read exactly 2 bytes")
 
 		key := -1
 		for k, v := range expected {
@@ -513,7 +515,7 @@ func TestShutdownInAppend(t *testing.T) {
 
 		delete(todelete, key)
 	}
-	assert.Equal(len(todelete), 0, "missing data %v", todelete)
+	assert.Equal(0, len(todelete), "missing data %v", todelete)
 
 	// restart
 	for i := range cs {
@@ -585,7 +587,7 @@ func checkWork(p gfs.Path, msg []byte, t *testing.T) {
 	assert.Nil(err)
 
 	msg = append(msg, msg...)
-	assert.Equal(buf, msg, "read wrong data")
+	assert.Equal(msg, buf, "read wrong data")
 
 	// other file operation
 	assert.Nil(c.Mkdir(gfs.Path("/" + string(msg))))
@@ -597,7 +599,7 @@ func checkWork(p gfs.Path, msg []byte, t *testing.T) {
 	buf = make([]byte, len(msg))
 	_, err = c.Read(p, 0, buf)
 	assert.Nil(err)
-	assert.Equal(buf, msg, "read wrong data")
+	assert.Equal(msg, buf, "read wrong data")
 }
 
 // Shutdown all chunk servers. You must store the meta data of chunkserver persistently
