@@ -8,7 +8,10 @@ import (
 	"time"
 )
 
-// chunkManager manges chunks
+// chunkManager manages chunks, including:
+//   - Chunk handle allocation, file path to chunk handles mapping,
+//   - Chunk replica location management, and
+//   - Chunk lease management.
 type chunkManager struct {
 	sync.RWMutex
 
@@ -133,18 +136,20 @@ func (cm *chunkManager) ExtendLease(handle gfs.ChunkHandle, primary gfs.ServerAd
 	chunk_info.Lock()
 	defer chunk_info.Unlock()
 	if chunk_info.primary != primary {
-		return fmt.Errorf("chunk %v is not primary", handle)
+		return fmt.Errorf("server %v is not primary", primary)
 	}
 	chunk_info.expire = time.Now().Add(gfs.LeaseExpire)
 	return nil
 }
 
-// CreateChunk creates a new chunk for path.
+// CreateChunk creates a new chunk for path. The new chunk is appended to the
+// end of the file.
 func (cm *chunkManager) CreateChunk(path gfs.Path, addrs []gfs.ServerAddress) (gfs.ChunkHandle, error) {
 	cm.Lock()
 	defer cm.Unlock()
 	file_info, ok := cm.file[path]
 	if !ok {
+		// create a new file
 		file_info = &fileInfo{
 			handles: make([]gfs.ChunkHandle, 0),
 		}
@@ -157,7 +162,9 @@ func (cm *chunkManager) CreateChunk(path gfs.Path, addrs []gfs.ServerAddress) (g
 	for _, addr := range addrs {
 		chunk_info.location.Add(addr)
 	}
+	handle := cm.numChunkHandle
+	cm.chunk[handle] = chunk_info
+	file_info.handles = append(file_info.handles, handle)
 	cm.numChunkHandle++
-	file_info.handles = append(file_info.handles, cm.numChunkHandle)
-	return 0, nil
+	return handle, nil
 }

@@ -19,7 +19,13 @@ func (p Path) Split() (dir Path, file string) {
 }
 
 func (p Path) SplitList() []string {
-	return strings.Split(string(p), "/")
+	// return strings.Split(string(p), "/")
+	// Note: `strings.Split` will return ["", ""] for "/",
+	// so we use `strings.FieldsFunc` instead.
+	splitFn := func(c rune) bool {
+		return c == '/'
+	}
+	return strings.FieldsFunc(string(p), splitFn)
 }
 
 type DataBufferID struct {

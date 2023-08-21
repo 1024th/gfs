@@ -5,6 +5,8 @@ import (
 	"gfs"
 	"gfs/util"
 	"math/rand"
+
+	"github.com/sirupsen/logrus"
 )
 
 // Client struct is the GFS client-side driver
@@ -182,6 +184,23 @@ func (c *Client) getPrimaryAndSecondaries(handle gfs.ChunkHandle) (primary gfs.S
 	return reply.Primary, reply.Secondaries, nil
 }
 
+func (c *Client) pushData(servers []gfs.ServerAddress, handle gfs.ChunkHandle, data []byte, reply *gfs.PushDataAndForwardReply,
+) error {
+	server_index, server := chooseServer(servers)
+	forward_to := append(servers[:server_index], servers[server_index+1:]...)
+	args := gfs.PushDataAndForwardArg{
+		Handle:    handle,
+		Data:      data,
+		ForwardTo: forward_to,
+	}
+	err := util.Call(server, "ChunkServer.RPCPushDataAndForward", args, &reply)
+	if err != nil {
+		logrus.Warnf("PushDataAndForward error: %v", err)
+		return err
+	}
+	return nil
+}
+
 // WriteChunk writes data to the chunk at specific offset.
 // len(data)+offset should be within chunk size.
 func (c *Client) WriteChunk(handle gfs.ChunkHandle, offset gfs.Offset, data []byte) error {
@@ -190,15 +209,9 @@ func (c *Client) WriteChunk(handle gfs.ChunkHandle, offset gfs.Offset, data []by
 		return err
 	}
 	// push data to all the replicas
-	replicas := append([]gfs.ServerAddress{primary}, secondaries...)
-	server_index, server := chooseServer(replicas)
-	forward_to := append(replicas[:server_index], replicas[server_index+1:]...)
 	var reply gfs.PushDataAndForwardReply
-	err = util.Call(server, "ChunkServer.RPCPushDataAndForward",
-		gfs.PushDataAndForwardArg{Handle: handle, Data: data, ForwardTo: forward_to}, &reply)
-	if err != nil {
-		return err
-	}
+	replicas := append([]gfs.ServerAddress{primary}, secondaries...)
+	c.pushData(replicas, handle, data, &reply)
 	// send the write request to the primary
 	var write_reply gfs.WriteChunkReply
 	err = util.Call(primary, "ChunkServer.RPCWriteChunk",
@@ -213,5 +226,27 @@ func (c *Client) WriteChunk(handle gfs.ChunkHandle, offset gfs.Offset, data []by
 // Chunk offset of the start of data will be returned if success.
 // len(data) should be within max append size.
 func (c *Client) AppendChunk(handle gfs.ChunkHandle, data []byte) (offset gfs.Offset, err error) {
-	return 0, nil
+	if len(data) > gfs.MaxAppendSize {
+		return 0, fmt.Errorf("append size exceeds the limit")
+	}
+	primary, secondaries, err := c.getPrimaryAndSecondaries(handle)
+	if err != nil {
+		return 0, err
+	}
+	// push data to all the replicas
+	var reply gfs.PushDataAndForwardReply
+	replicas := append([]gfs.ServerAddress{primary}, secondaries...)
+	c.pushData(replicas, handle, data, &reply)
+	// send the append request to the primary
+	var append_reply gfs.AppendChunkReply
+	err = util.Call(primary, "ChunkServer.RPCAppendChunk",
+		gfs.AppendChunkArg{DataID: reply.DataID, Secondaries: secondaries}, &append_reply)
+	if err != nil {
+		return 0, err
+	}
+	offset = append_reply.Offset
+	if append_reply.Err != gfs.Success {
+		return offset, fmt.Errorf("append failed: %v", reply.Err)
+	}
+	return offset, nil
 }

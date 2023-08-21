@@ -38,16 +38,19 @@ func newNamespaceManager() *namespaceManager {
 // If any of the parent directories does not exist, it returns an error.
 // Otherwise, it returns the error returned by f.
 func (nm *namespaceManager) withRLock(p gfs.Path, f func(*nsTree) error) error {
+	// logrus.Infof("withRLock p: %v", p)
 	parts := p.SplitList()
+	// logrus.Infof("withRLock parts: %v, len: %v", parts, len(parts))
 	nodes := make([]*nsTree, len(parts)+1)
 	nodes[0] = nm.root
 	for i := 0; i < len(parts); i++ {
+		// logrus.Infof("withRLock i: %v, parts[i]: %v", i, parts[i])
 		nodes[i].RLock()
 		defer nodes[i].RUnlock()
 		var ok bool
 		nodes[i+1], ok = nodes[i].children[parts[i]]
 		if !ok {
-			return fmt.Errorf("directory %v not found", parts[i])
+			return fmt.Errorf("%v not found", parts[i])
 		}
 	}
 	return f(nodes[len(parts)])

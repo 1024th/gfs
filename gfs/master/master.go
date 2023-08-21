@@ -171,37 +171,46 @@ func (m *Master) RPCGetFileInfo(args gfs.GetFileInfoArg, reply *gfs.GetFileInfoR
 // RPCGetChunkHandle returns the chunk handle of (path, index).
 // If the requested index is bigger than the number of chunks of this path by exactly one, create one.
 func (m *Master) RPCGetChunkHandle(args gfs.GetChunkHandleArg, reply *gfs.GetChunkHandleReply) error {
-	info, err := m.nm.GetPathInfo(args.Path)
-	if info.IsDir {
-		return fmt.Errorf("%v is a directory", args.Path)
-	}
-	if err != nil {
-		return err
-	}
-	if args.Index >= gfs.ChunkIndex(info.Chunks) {
-		return fmt.Errorf("index %v is out of range", args.Index)
-	}
-	if args.Index == gfs.ChunkIndex(info.Chunks) {
-		// create new chunk
-		addrs, err := m.csm.ChooseServers(gfs.DefaultNumReplicas)
-		if err != nil {
-			return err
+	// info, err := m.nm.GetPathInfo(args.Path)
+	// We may need to modify the nsTree, so we use low-level function directly
+	return m.nm.withRLock(args.Path, func(n *nsTree) error {
+		n.RLock()
+		defer n.RUnlock()
+		if n.isDir {
+			return fmt.Errorf("%v is a directory", args.Path)
 		}
-		handle, err := m.cm.CreateChunk(args.Path, addrs)
-		if err != nil {
-			return err
+		if args.Index < 0 || args.Index > gfs.ChunkIndex(n.chunks) {
+			return fmt.Errorf("index %v is out of range", args.Index)
 		}
-		err = m.csm.AddChunk(addrs, handle)
-		if err != nil {
-			return err
+		if args.Index == gfs.ChunkIndex(n.chunks) {
+			// create a new chunk
+			log.Infof("Creating a new chunk for %v", args.Path)
+			addrs, err := m.csm.ChooseServers(gfs.DefaultNumReplicas)
+			if err != nil {
+				return err
+			}
+			handle, err := m.cm.CreateChunk(args.Path, addrs)
+			if err != nil {
+				return err
+			}
+			err = m.csm.AddChunk(addrs, handle)
+			if err != nil {
+				return err
+			}
+			// update the number of chunks, be careful about the lock order
+			n.RUnlock()
+			n.Lock()
+			n.chunks++
+			n.Unlock()
+			n.RLock()
+			reply.Handle = handle
+		} else {
+			handle, err := m.cm.GetChunk(args.Path, args.Index)
+			if err != nil {
+				return err
+			}
+			reply.Handle = handle
 		}
-		reply.Handle = handle
-	} else {
-		handle, err := m.cm.GetChunk(args.Path, args.Index)
-		if err != nil {
-			return err
-		}
-		reply.Handle = handle
-	}
-	return nil
+		return nil
+	})
 }
