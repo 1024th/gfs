@@ -18,11 +18,7 @@ func Call(srv gfs.ServerAddress, rpcname string, args interface{}, reply interfa
 	defer c.Close()
 
 	err := c.Call(rpcname, args, reply)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
 // CallAll applies the rpc call to all destinations.

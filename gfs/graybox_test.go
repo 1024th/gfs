@@ -291,6 +291,7 @@ func TestWriteReadBigData(t *testing.T) {
 	// test read at EOF
 	_, err = c.Read(p, gfs.MaxChunkSize/2+gfs.Offset(size), buf)
 	assert.NotNil(err, "should return error if read at EOF")
+	assert.Equal(io.EOF, err, "should return EOF if read at EOF")
 
 	// test append offset
 	var offset gfs.Offset

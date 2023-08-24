@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"gfs"
 	"gfs/util"
+	"io"
 	"math/rand"
 
 	"github.com/sirupsen/logrus"
@@ -199,6 +200,9 @@ func (c *Client) ReadChunk(handle gfs.ChunkHandle, offset gfs.Offset, data []byt
 	_, server := chooseServer(l)
 	var reply gfs.ReadChunkReply
 	err = util.Call(server, "ChunkServer.RPCReadChunk", gfs.ReadChunkArg{Handle: handle, Offset: offset, Length: len(data)}, &reply)
+	if reply.Err == gfs.ReadEOF {
+		return 0, io.EOF
+	}
 	if err != nil {
 		return 0, err
 	}

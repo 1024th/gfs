@@ -2,6 +2,7 @@ package chunkserver
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/rpc"
 	"os"
@@ -162,6 +163,10 @@ func (cs *ChunkServer) RPCReadChunk(args gfs.ReadChunkArg, reply *gfs.ReadChunkR
 	reply.Data = b[:n]
 	reply.Length = n
 	// TODO: consider reply.Err
+	if err == io.EOF {
+		reply.Err = gfs.ReadEOF
+		return nil // If an error is returned, the reply parameter will not be sent back to the client.
+	}
 	return err
 }
 
@@ -357,15 +362,16 @@ func (cs *ChunkServer) RPCApplyCopy(args gfs.ApplyCopyArg, reply *gfs.ApplyCopyR
 // The chunk info is read-locked during the read to ensure the atomicity of the read.
 func (cs *ChunkServer) readChunk(handle gfs.ChunkHandle, offset gfs.Offset, b []byte) (n int, err error) {
 	cs.chunkLock.RLock()
-	chunk, ok := cs.chunk[handle]
+	_, ok := cs.chunk[handle]
 	cs.chunkLock.RUnlock()
 	if !ok {
 		return 0, fmt.Errorf("chunk %v not found", handle)
 	}
 	log.Infof("read chunk %v offset %v length %v", handle, offset, len(b))
-	if offset+gfs.Offset(len(b)) > chunk.length {
-		return 0, fmt.Errorf("offset+length exceeds chunk length %v", chunk.length)
-	}
+	// if offset+gfs.Offset(len(b)) > chunk.length {
+	// 	return 0, fmt.Errorf("offset+length exceeds chunk length %v", chunk.length)
+	// }
+	// Should return EOF?
 	chunkpath := path.Join(cs.serverRoot, fmt.Sprintf("%v", handle))
 	f, err := os.Open(chunkpath)
 	if err != nil {
