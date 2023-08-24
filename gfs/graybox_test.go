@@ -227,7 +227,7 @@ func TestAppendChunk(t *testing.T) {
 				break
 			}
 		}
-		assert.NotEqual(key, -1, "incorrect data", buf)
+		assert.NotEqual(-1, key, "incorrect data", buf)
 
 		delete(expected, key)
 	}
@@ -262,7 +262,7 @@ func TestPadOver(t *testing.T) {
 	// an append cause pad, and client should retry to next chunk
 	offset, err := c.Append(p, buf)
 	assert.Nil(err)
-	assert.Equal(gfs.MaxChunkSize, offset, "should append to next chunk")
+	assert.Equal(gfs.Offset(gfs.MaxChunkSize), offset, "should append to next chunk")
 }
 
 // big data that invokes several chunks
@@ -511,7 +511,7 @@ func TestShutdownInAppend(t *testing.T) {
 				break
 			}
 		}
-		assert.NotEqual(key, -1, "incorrect data", buf)
+		assert.NotEqual(-1, key, "incorrect data", buf)
 
 		delete(todelete, key)
 	}
