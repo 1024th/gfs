@@ -87,7 +87,7 @@ func (c *Client) Read(path gfs.Path, offset gfs.Offset, data []byte) (n int, err
 		n += read_len
 		offset += gfs.Offset(read_len)
 	}
-	return 0, nil
+	return n, nil
 }
 
 // Write writes data to the file at specific offset.
@@ -102,28 +102,60 @@ func (c *Client) Write(path gfs.Path, offset gfs.Offset, data []byte) error {
 	}
 
 	end := offset + gfs.Offset(len(data))
-	for offset < end {
-		chunkIdx := gfs.ChunkIndex(offset / gfs.MaxChunkSize)
-		chunkOffset := offset % gfs.MaxChunkSize
+	logrus.Infof("Writing %v bytes to file %v at offset %v", len(data), path, offset)
+	cur_offset := offset
+	for cur_offset < end {
+		chunkIdx := gfs.ChunkIndex(cur_offset / gfs.MaxChunkSize)
+		chunkOffset := cur_offset % gfs.MaxChunkSize
 		chunkHandle, err := c.GetChunkHandle(path, chunkIdx)
 		if err != nil {
 			return err
 		}
 
-		len := int(min(gfs.MaxChunkSize-chunkOffset, end-offset))
-		buf := data[offset : offset+gfs.Offset(len)]
+		len := min(gfs.MaxChunkSize-chunkOffset, end-cur_offset)
+		buf := data[cur_offset-offset : cur_offset-offset+len]
 		err = c.WriteChunk(chunkHandle, chunkOffset, buf)
 		if err != nil {
 			return err
 		}
-		offset += gfs.Offset(len)
+		cur_offset += len
 	}
 	return nil
 }
 
 // Append appends data to the file. Offset of the beginning of appended data is returned.
 func (c *Client) Append(path gfs.Path, data []byte) (offset gfs.Offset, err error) {
-	return 0, nil
+	var file_info gfs.GetFileInfoReply
+	err = util.Call(c.master, "Master.RPCGetFileInfo", gfs.GetFileInfoArg{Path: path}, &file_info)
+	if err != nil {
+		return 0, err
+	}
+	if file_info.IsDir {
+		return 0, fmt.Errorf("cannot append to a directory")
+	}
+
+	var chunkIdx gfs.ChunkIndex
+	if file_info.Chunks == 0 {
+		chunkIdx = 0
+	} else {
+		chunkIdx = gfs.ChunkIndex(file_info.Chunks - 1)
+	}
+	for {
+		// If the append causes the last chunk to exceed the max chunk size,
+		// create a new chunk and append to it.
+		chunkHandle, err := c.GetChunkHandle(path, chunkIdx)
+		if err != nil {
+			return 0, err
+		}
+		chunkOffset, err := c.AppendChunk(chunkHandle, data)
+		offset = gfs.Offset(chunkIdx)*gfs.MaxChunkSize + chunkOffset
+		if err == nil || gfs.GetErrorCode(err) != gfs.AppendExceedChunkSize {
+			return offset, err
+		}
+		// Error is AppendExceedChunkSize, create a new chunk and retry.
+		chunkIdx++
+		logrus.Infof("Appending to a new chunk %v of file %v", chunkIdx, path)
+	}
 }
 
 // chooseServer randomly chooses a server from the list.
@@ -134,7 +166,8 @@ func chooseServer(servers []gfs.ServerAddress) (index int, server gfs.ServerAddr
 }
 
 // GetChunkHandle returns the chunk handle of (path, index).
-// If the chunk doesn't exist, master will create one.
+// If the requested index is bigger than the number of chunks of this path by exactly one,
+// master will create a new chunk and return its handle.
 func (c *Client) GetChunkHandle(path gfs.Path, index gfs.ChunkIndex) (gfs.ChunkHandle, error) {
 	// TODO: cache chunk handle using the file name and chunk index as the key.
 	var reply gfs.GetChunkHandleReply
@@ -246,7 +279,7 @@ func (c *Client) AppendChunk(handle gfs.ChunkHandle, data []byte) (offset gfs.Of
 	}
 	offset = append_reply.Offset
 	if append_reply.Err != gfs.Success {
-		return offset, fmt.Errorf("append failed: %v", reply.Err)
+		return offset, gfs.Error{Code: append_reply.Err, Err: "append error"}
 	}
 	return offset, nil
 }

@@ -80,6 +80,16 @@ func (e Error) Error() string {
 	return e.Err
 }
 
+func GetErrorCode(err error) ErrorCode {
+	if err == nil {
+		return Success
+	}
+	if e, ok := err.(Error); ok {
+		return e.Code
+	}
+	return UnknownError
+}
+
 // system config
 const (
 	LeaseExpire        = 2 * time.Second //1 * time.Minute
