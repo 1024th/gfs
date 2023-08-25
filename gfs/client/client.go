@@ -78,14 +78,14 @@ func (c *Client) Read(path gfs.Path, offset gfs.Offset, data []byte) (n int, err
 		len := int(min(gfs.MaxChunkSize-chunkOffset, end-offset))
 		buf := make([]byte, len)
 		read_len, err := c.ReadChunk(chunkHandle, chunkOffset, buf)
-		if err != nil {
-			return 0, err
-		}
-		if read_len != len {
-			return 0, fmt.Errorf("read length mismatch")
-		}
 		copy(data[n:], buf[:read_len])
 		n += read_len
+		if err != nil {
+			return n, err
+		}
+		if read_len != len {
+			return n, fmt.Errorf("read length mismatch")
+		}
 		offset += gfs.Offset(read_len)
 	}
 	return n, nil
@@ -200,14 +200,14 @@ func (c *Client) ReadChunk(handle gfs.ChunkHandle, offset gfs.Offset, data []byt
 	_, server := chooseServer(l)
 	var reply gfs.ReadChunkReply
 	err = util.Call(server, "ChunkServer.RPCReadChunk", gfs.ReadChunkArg{Handle: handle, Offset: offset, Length: len(data)}, &reply)
-	if reply.Err == gfs.ReadEOF {
-		return 0, io.EOF
-	}
 	if err != nil {
 		return 0, err
 	}
 	copy(data, reply.Data)
-	return reply.Length, nil
+	if reply.Err == gfs.ReadEOF {
+		err = io.EOF
+	}
+	return reply.Length, err
 }
 
 // getPrimaryAndSecondaries returns the primary and secondary chunk servers of the chunk.

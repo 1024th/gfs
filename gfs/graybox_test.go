@@ -351,7 +351,7 @@ func TestComprehensiveOperation(t *testing.T) {
 	var createCt Counter
 	wg0.Add(2)
 	for i := 0; i < 2; i++ {
-		go func(x int) {
+		go func() {
 			ticker := time.Tick(createTick)
 		loop:
 			for {
@@ -370,7 +370,7 @@ func TestComprehensiveOperation(t *testing.T) {
 				}
 			}
 			wg0.Done()
-		}(i)
+		}()
 	}
 
 	go func() {
@@ -383,7 +383,7 @@ func TestComprehensiveOperation(t *testing.T) {
 	var sendCt Counter
 	wg1.Add(N)
 	for i := 0; i < N; i++ {
-		go func(x int) {
+		go func() {
 			for p := range line[0] {
 				x := sendCt.Next()
 
@@ -395,7 +395,7 @@ func TestComprehensiveOperation(t *testing.T) {
 				line[2] <- p
 			}
 			wg1.Done()
-		}(i)
+		}()
 	}
 
 	go func() {
@@ -410,7 +410,7 @@ func TestComprehensiveOperation(t *testing.T) {
 	fileOffset := make(map[gfs.Path]int)
 	wg2.Add(N)
 	for i := 0; i < N; i++ {
-		go func(x int) {
+		go func() {
 			for p := range line[2] {
 				lock2.RLock()
 				pos := fileOffset[p]
@@ -423,7 +423,7 @@ func TestComprehensiveOperation(t *testing.T) {
 					continue
 				}
 				buf = buf[:n-1]
-				//fmt.Println("read ", p, " at ", pos, " : ", string(buf))
+				// fmt.Println("read ", p, " at ", pos, " : ", string(buf))
 
 				lock2.Lock()
 				for _, v := range strings.Split(string(buf), ",") {
@@ -438,7 +438,7 @@ func TestComprehensiveOperation(t *testing.T) {
 				time.Sleep(N * time.Millisecond)
 			}
 			wg2.Done()
-		}(i)
+		}()
 	}
 
 	// wait to test race contition
