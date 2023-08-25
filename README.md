@@ -6,8 +6,6 @@ The framework given in [this lab](https://bitbucket.org/abcdabcd987/ppca-gfs/) w
 
 ## TODO
 
-- Error code, io.EOF
-- Append
 - Stale replica detection (chunk version)
 - GC, ...
 - Cache on client side

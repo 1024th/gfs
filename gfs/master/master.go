@@ -2,6 +2,7 @@ package master
 
 import (
 	"fmt"
+	"gfs/util"
 	"net"
 	"net/rpc"
 	"time"
@@ -97,6 +98,54 @@ func (m *Master) Shutdown() {
 // BackgroundActivity does all the background activities:
 // dead chunkserver handling, garbage collection, stale replica detection, etc
 func (m *Master) BackgroundActivity() error {
+	// Dead chunkserver handling
+	dead := m.csm.DetectDeadServers()
+	for _, addr := range dead {
+		log.Warnf("Chunkserver %v is dead", addr)
+		handles, err := m.csm.RemoveServer(addr)
+		if err != nil {
+			return err
+		}
+		for _, handle := range handles {
+			n, err := m.cm.RemoveReplica(handle, addr)
+			if err != nil {
+				return err
+			}
+			if n < gfs.MinimumNumReplicas {
+				err := m.ReReplicate(handle)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// ReReplicate is called when a chunk has less than MinimumNumReplicas replicas.
+// It chooses chunkservers and performs re-replication.
+func (m *Master) ReReplicate(handle gfs.ChunkHandle) error {
+	from, to, err := m.csm.ChooseReReplication(handle)
+	if err != nil {
+		return err
+	}
+	log.Infof("Re-replicating chunk %v from %v to %v", handle, from, to)
+	err = util.Call(to, "ChunkServer.RPCCreateChunk", gfs.CreateChunkArg{Handle: handle}, nil)
+	if err != nil {
+		return err
+	}
+	err = util.Call(from, "ChunkServer.RPCSendCopy", gfs.SendCopyArg{Handle: handle, Address: to}, nil)
+	if err != nil {
+		return err
+	}
+	err = m.cm.RegisterReplica(handle, to)
+	if err != nil {
+		return err
+	}
+	err = m.csm.AddChunk([]gfs.ServerAddress{to}, handle)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 

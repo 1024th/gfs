@@ -63,6 +63,20 @@ func (cm *chunkManager) RegisterReplica(handle gfs.ChunkHandle, addr gfs.ServerA
 	return nil
 }
 
+// RemoveReplica removes a replica for a chunk. Returns the number of replicas left.
+func (cm *chunkManager) RemoveReplica(handle gfs.ChunkHandle, addr gfs.ServerAddress) (int, error) {
+	cm.RLock()
+	defer cm.RUnlock()
+	chunk_info, ok := cm.chunk[handle]
+	if !ok {
+		return 0, fmt.Errorf("chunk %v not found", handle)
+	}
+	chunk_info.Lock()
+	defer chunk_info.Unlock()
+	chunk_info.location.Delete(addr)
+	return chunk_info.location.Size(), nil
+}
+
 // GetReplicas returns the replicas of a chunk
 func (cm *chunkManager) GetReplicas(handle gfs.ChunkHandle) (*ServerSet, error) {
 	cm.RLock()
