@@ -1,6 +1,8 @@
 package util
 
 import (
+	"bytes"
+	"encoding/gob"
 	"math/rand"
 	"sync"
 )
@@ -11,6 +13,22 @@ import (
 type ArraySet[T comparable] struct {
 	arr  []T
 	lock sync.RWMutex
+}
+
+func (s *ArraySet[T]) GobEncode() ([]byte, error) {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	w := new(bytes.Buffer)
+	gob.NewEncoder(w).Encode(s.arr)
+	return w.Bytes(), nil
+}
+
+func (s *ArraySet[T]) GobDecode(buf []byte) error {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	r := bytes.NewBuffer(buf)
+	err := gob.NewDecoder(r).Decode(&s.arr)
+	return err
 }
 
 // Add adds an element to the set.

@@ -1,10 +1,14 @@
 package master
 
 import (
+	"encoding/gob"
 	"fmt"
 	"gfs/util"
 	"net"
 	"net/rpc"
+	"os"
+	"path"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -24,6 +28,70 @@ type Master struct {
 	csm *chunkServerManager
 }
 
+type Metadata struct {
+	NsRoot         *NsTree
+	Chunks         *map[gfs.ChunkHandle]*ChunkInfo
+	Files          *map[gfs.Path]*FileChunks
+	NumChunkHandle gfs.ChunkHandle
+}
+
+const (
+	metadataFilename = "master.meta"
+)
+
+func nsTreeToString(n *NsTree, indent int) string {
+	s := strings.Repeat("  ", indent)
+	s += fmt.Sprintf("%v: %v, %v\n", n.Name, n.IsDir, n.Chunks)
+	for _, child := range n.Children {
+		s += nsTreeToString(child, indent+1)
+	}
+	return s
+}
+
+// saveMetadata saves the metadata to disk
+func (m *Master) saveMetadata() error {
+	metadata := Metadata{
+		NsRoot:         m.nm.root,
+		Chunks:         &m.cm.chunk,
+		Files:          &m.cm.file,
+		NumChunkHandle: m.cm.numChunkHandle,
+	}
+	name := path.Join(m.serverRoot, metadataFilename)
+	f, err := os.Create(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := gob.NewEncoder(f)
+	err = enc.Encode(metadata)
+	log.Infof("Saved metadata: %v", metadata)
+	log.Infof("Namespace tree: \n%v", nsTreeToString(metadata.NsRoot, 0))
+	return err
+}
+
+// loadMetadata loads the metadata from disk
+func (m *Master) loadMetadata() error {
+	var metadata Metadata
+	name := path.Join(m.serverRoot, metadataFilename)
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	dec := gob.NewDecoder(f)
+	err = dec.Decode(&metadata)
+	if err != nil {
+		return err
+	}
+	log.Infof("Loaded metadata: %v", metadata)
+	log.Infof("Namespace tree: \n%v", nsTreeToString(metadata.NsRoot, 0))
+	m.nm.root = metadata.NsRoot
+	m.cm.chunk = *metadata.Chunks
+	m.cm.file = *metadata.Files
+	m.cm.numChunkHandle = metadata.NumChunkHandle
+	return nil
+}
+
 // NewAndServe starts a master and returns the pointer to it.
 func NewAndServe(address gfs.ServerAddress, serverRoot string) *Master {
 	m := &Master{
@@ -35,6 +103,11 @@ func NewAndServe(address gfs.ServerAddress, serverRoot string) *Master {
 	m.nm = newNamespaceManager()
 	m.cm = newChunkManager()
 	m.csm = newChunkServerManager()
+
+	err := m.loadMetadata()
+	if err != nil {
+		log.Warnf("Failed to load metadata: %v", err)
+	}
 
 	rpcs := rpc.NewServer()
 	rpcs.Register(m)
@@ -60,8 +133,7 @@ func NewAndServe(address gfs.ServerAddress, serverRoot string) *Master {
 					conn.Close()
 				}()
 			} else {
-				log.Fatal("accept error:", err)
-				log.Exit(1)
+				log.Errorf("Master accept error: %v", err)
 			}
 		}
 	}()
@@ -80,7 +152,7 @@ func NewAndServe(address gfs.ServerAddress, serverRoot string) *Master {
 
 			err := m.BackgroundActivity()
 			if err != nil {
-				log.Fatal("Background error ", err)
+				log.Error("Background error ", err)
 			}
 		}
 	}()
@@ -93,6 +165,14 @@ func NewAndServe(address gfs.ServerAddress, serverRoot string) *Master {
 // Shutdown shuts down master
 func (m *Master) Shutdown() {
 	close(m.shutdown)
+	err := m.l.Close()
+	if err != nil {
+		log.Errorf("Failed to close listener: %v", err)
+	}
+	err = m.saveMetadata()
+	if err != nil {
+		log.Errorf("Failed to save metadata: %v", err)
+	}
 }
 
 // BackgroundActivity does all the background activities:
@@ -152,11 +232,26 @@ func (m *Master) ReReplicate(handle gfs.ChunkHandle) error {
 // RPCHeartbeat is called by chunkserver to let the master know that a chunkserver is alive.
 // Lease extension request is included.
 func (m *Master) RPCHeartbeat(args gfs.HeartbeatArg, reply *gfs.HeartbeatReply) error {
-	m.csm.Heartbeat(args.Address)
+	isNew := m.csm.Heartbeat(args.Address)
 	for _, handle := range args.LeaseExtensions {
 		err := m.cm.ExtendLease(handle, args.Address)
 		if err != nil {
 			return err
+		}
+	}
+	if isNew {
+		// Ask the chunkserver to report all the chunks it has
+		log.Infof("New chunkserver %v, asking for chunks", args.Address)
+		var reply gfs.ReportChunksReply
+		err := util.Call(args.Address, "ChunkServer.RPCReportChunks", gfs.ReportChunksArg{}, &reply)
+		if err != nil {
+			return err
+		}
+		for _, info := range reply.Chunks {
+			err := m.cm.RegisterReplica(info.Handle, args.Address)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -222,16 +317,16 @@ func (m *Master) RPCGetFileInfo(args gfs.GetFileInfoArg, reply *gfs.GetFileInfoR
 func (m *Master) RPCGetChunkHandle(args gfs.GetChunkHandleArg, reply *gfs.GetChunkHandleReply) error {
 	// info, err := m.nm.GetPathInfo(args.Path)
 	// We may need to modify the nsTree, so we use low-level function directly
-	return m.nm.withRLock(args.Path, func(n *nsTree) error {
-		n.RLock()
-		defer n.RUnlock()
-		if n.isDir {
+	return m.nm.withRLock(args.Path, func(n *NsTree) error {
+		n.lock.RLock()
+		defer n.lock.RUnlock()
+		if n.IsDir {
 			return fmt.Errorf("%v is a directory", args.Path)
 		}
-		if args.Index < 0 || args.Index > gfs.ChunkIndex(n.chunks) {
+		if args.Index < 0 || args.Index > gfs.ChunkIndex(n.Chunks) {
 			return fmt.Errorf("index %v is out of range", args.Index)
 		}
-		if args.Index == gfs.ChunkIndex(n.chunks) {
+		if args.Index == gfs.ChunkIndex(n.Chunks) {
 			// create a new chunk
 			log.Infof("Creating a new chunk for %v", args.Path)
 			addrs, err := m.csm.ChooseServers(gfs.DefaultNumReplicas)
@@ -247,11 +342,11 @@ func (m *Master) RPCGetChunkHandle(args gfs.GetChunkHandleArg, reply *gfs.GetChu
 				return err
 			}
 			// update the number of chunks, be careful about the lock order
-			n.RUnlock()
-			n.Lock()
-			n.chunks++
-			n.Unlock()
-			n.RLock()
+			n.lock.RUnlock()
+			n.lock.Lock()
+			n.Chunks++
+			n.lock.Unlock()
+			n.lock.RLock()
 			reply.Handle = handle
 		} else {
 			handle, err := m.cm.GetChunk(args.Path, args.Index)

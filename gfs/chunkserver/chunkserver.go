@@ -1,6 +1,7 @@
 package chunkserver
 
 import (
+	"encoding/gob"
 	"fmt"
 	"io"
 	"net"
@@ -27,15 +28,68 @@ type ChunkServer struct {
 
 	dl                     *downloadBuffer                 // expiring download buffer
 	pendingLeaseExtensions *util.ArraySet[gfs.ChunkHandle] // pending lease extension
-	chunk                  map[gfs.ChunkHandle]*chunkInfo  // chunk information
+	chunk                  map[gfs.ChunkHandle]*ChunkInfo  // chunk information
 	chunkLock              sync.RWMutex
 }
 
-type chunkInfo struct {
-	sync.RWMutex
-	length        gfs.Offset
-	version       gfs.ChunkVersion // version number of the chunk in disk
-	newestVersion gfs.ChunkVersion // allocated newest version number
+type ChunkInfo struct {
+	lock          sync.RWMutex
+	Length        gfs.Offset
+	Version       gfs.ChunkVersion // version number of the chunk in disk
+	NewestVersion gfs.ChunkVersion // allocated newest version number
+}
+
+const (
+	metadataFilename = "chunkserver.meta"
+)
+
+// loadMetadata loads metadata from disk
+func (cs *ChunkServer) loadMetadata() error {
+	cs.chunkLock.Lock()
+	defer cs.chunkLock.Unlock()
+
+	name := path.Join(cs.serverRoot, metadataFilename)
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var tmp map[gfs.ChunkHandle]*ChunkInfo
+	dec := gob.NewDecoder(f)
+	err = dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+
+	// check if the chunk files exist
+	for handle := range tmp {
+		chunkpath := path.Join(cs.serverRoot, fmt.Sprintf("%v", handle))
+		info, err := os.Stat(chunkpath)
+		if err == nil && !info.IsDir() {
+			cs.chunk[handle] = tmp[handle]
+		} else {
+			log.Warnf("chunk %v not found", handle)
+		}
+	}
+	return nil
+}
+
+// saveMetadata saves metadata to disk
+func (cs *ChunkServer) saveMetadata() error {
+	cs.chunkLock.RLock()
+	defer cs.chunkLock.RUnlock()
+
+	name := path.Join(cs.serverRoot, metadataFilename)
+	f, err := os.Create(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	enc := gob.NewEncoder(f)
+	err = enc.Encode(cs.chunk)
+	return err
 }
 
 // NewAndServe starts a chunkserver and return the pointer to it.
@@ -47,8 +101,25 @@ func NewAndServe(addr, masterAddr gfs.ServerAddress, serverRoot string) *ChunkSe
 		serverRoot:             serverRoot,
 		dl:                     newDownloadBuffer(gfs.DownloadBufferExpire, gfs.DownloadBufferTick),
 		pendingLeaseExtensions: new(util.ArraySet[gfs.ChunkHandle]),
-		chunk:                  make(map[gfs.ChunkHandle]*chunkInfo),
+		chunk:                  make(map[gfs.ChunkHandle]*ChunkInfo),
 	}
+
+	info, err := os.Stat(serverRoot)
+	if err != nil {
+		log.Info("ServerRoot not found, creating...")
+		err := os.Mkdir(serverRoot, 0755)
+		if err != nil {
+			log.Fatalf("Create serverRoot error: %v", err)
+		}
+	} else if !info.IsDir() {
+		log.Fatal("ServerRoot is not a directory")
+	}
+
+	err = cs.loadMetadata()
+	if err != nil {
+		log.Warn("load metadata error: ", err)
+	}
+
 	rpcs := rpc.NewServer()
 	rpcs.Register(cs)
 	l, e := net.Listen("tcp", string(cs.address))
@@ -95,8 +166,7 @@ func NewAndServe(addr, masterAddr gfs.ServerAddress, serverRoot string) *ChunkSe
 				LeaseExtensions: le,
 			}
 			if err := util.Call(cs.master, "Master.RPCHeartbeat", args, nil); err != nil {
-				log.Fatal("heartbeat rpc error ", err)
-				log.Exit(1)
+				log.Error("heartbeat rpc error ", err)
 			}
 
 			time.Sleep(gfs.HeartbeatInterval)
@@ -116,6 +186,25 @@ func (cs *ChunkServer) Shutdown() {
 		close(cs.shutdown)
 		cs.l.Close()
 	}
+	err := cs.saveMetadata()
+	if err != nil {
+		log.Error("save metadata error: ", err)
+	}
+}
+
+// RPCReportChunks is called by master to report chunks that the chunkserver holds.
+func (cs *ChunkServer) RPCReportChunks(args gfs.ReportChunksArg, reply *gfs.ReportChunksReply) error {
+	cs.chunkLock.RLock()
+	defer cs.chunkLock.RUnlock()
+	for handle, chunk := range cs.chunk {
+		reply.Chunks = append(reply.Chunks, gfs.ChunkInfo{
+			Handle:        handle,
+			Length:        chunk.Length,
+			Version:       chunk.Version,
+			NewestVersion: chunk.NewestVersion,
+		})
+	}
+	return nil
 }
 
 // RPCPushDataAndForward is called by client.
@@ -148,10 +237,10 @@ func (cs *ChunkServer) RPCForwardData(args gfs.ForwardDataArg, reply *gfs.Forwar
 func (cs *ChunkServer) RPCCreateChunk(args gfs.CreateChunkArg, reply *gfs.CreateChunkReply) error {
 	cs.chunkLock.Lock()
 	defer cs.chunkLock.Unlock()
-	cs.chunk[args.Handle] = &chunkInfo{
-		length:        0,
-		version:       0,
-		newestVersion: 0,
+	cs.chunk[args.Handle] = &ChunkInfo{
+		Length:        0,
+		Version:       0,
+		NewestVersion: 0,
 	}
 	return nil
 }
@@ -203,13 +292,13 @@ func (cs *ChunkServer) RPCWriteChunk(args gfs.WriteChunkArg, reply *gfs.WriteChu
 	}
 
 	// apply mutation locally
-	chunk.Lock()
-	defer chunk.Unlock()
+	chunk.lock.Lock()
+	defer chunk.lock.Unlock()
 	err := cs.writeFile(args.DataID.Handle, args.Offset, data)
 	if err != nil {
 		return err
 	}
-	chunk.length = max(chunk.length, args.Offset+gfs.Offset(len(data)))
+	chunk.Length = max(chunk.Length, args.Offset+gfs.Offset(len(data)))
 
 	// ask secondaries to apply mutation
 	m := gfs.ApplyMutationArg{
@@ -241,40 +330,40 @@ func (cs *ChunkServer) RPCAppendChunk(args gfs.AppendChunkArg, reply *gfs.Append
 		return fmt.Errorf("chunk %v not found", args.DataID.Handle)
 	}
 
-	chunk.Lock()
-	defer chunk.Unlock()
+	chunk.lock.Lock()
+	defer chunk.lock.Unlock()
 	m := gfs.ApplyMutationArg{
 		DataID:  args.DataID,
-		Version: chunk.version, // TODO
+		Version: chunk.Version, // TODO
 	}
-	if chunk.length+gfs.Offset(len(data)) > gfs.MaxChunkSize {
+	if chunk.Length+gfs.Offset(len(data)) > gfs.MaxChunkSize {
 		// pad current chunk
 		log.Infof("[%v] pad chunk %v", cs.address, args.DataID.Handle)
 		m.Mtype = gfs.MutationPad
-		m.Offset = chunk.length
-		reply.Offset = chunk.length
+		m.Offset = chunk.Length
+		reply.Offset = chunk.Length
 		reply.Err = gfs.AppendExceedChunkSize
 		// apply mutation locally
-		b := make([]byte, gfs.MaxChunkSize-chunk.length)
+		b := make([]byte, gfs.MaxChunkSize-chunk.Length)
 		err := cs.writeFile(args.DataID.Handle, m.Offset, b)
 		if err != nil {
 			return err
 		}
-		chunk.length = gfs.MaxChunkSize // update chunk length
+		chunk.Length = gfs.MaxChunkSize // update chunk length
 		// ask secondaries to apply mutation
 		return cs.applyMutationTo(args.Secondaries, m)
 	} else {
 		// no need to pad, normal append
 		m.Mtype = gfs.MutationAppend
-		m.Offset = chunk.length
-		reply.Offset = chunk.length
+		m.Offset = chunk.Length
+		reply.Offset = chunk.Length
 		reply.Err = gfs.Success
 		// apply mutation locall
 		err := cs.writeFile(args.DataID.Handle, m.Offset, data)
 		if err != nil {
 			return err
 		}
-		chunk.length += gfs.Offset(len(data)) // update chunk length
+		chunk.Length += gfs.Offset(len(data)) // update chunk length
 		// ask secondaries to apply mutation
 		return cs.applyMutationTo(args.Secondaries, m)
 	}
@@ -306,16 +395,16 @@ func (cs *ChunkServer) RPCApplyMutation(args gfs.ApplyMutationArg, reply *gfs.Ap
 		return fmt.Errorf("offset+length exceeds chunk size limit")
 	}
 	// lock the chunk
-	chunk.Lock()
-	defer chunk.Unlock()
+	chunk.lock.Lock()
+	defer chunk.lock.Unlock()
 	// write data to disk
 	err := cs.writeFile(handle, args.Offset, data)
 	if err != nil {
 		return err
 	}
 	// update chunk info
-	chunk.length = max(chunk.length, args.Offset+gfs.Offset(len(data)))
-	log.Infof("[%v] chunk %v length %v", cs.address, handle, chunk.length)
+	chunk.Length = max(chunk.Length, args.Offset+gfs.Offset(len(data)))
+	log.Infof("[%v] chunk %v length %v", cs.address, handle, chunk.Length)
 	return nil
 }
 
@@ -327,14 +416,14 @@ func (cs *ChunkServer) RPCSendCopy(args gfs.SendCopyArg, reply *gfs.SendCopyRepl
 	if !ok {
 		return fmt.Errorf("chunk %v not found", args.Handle)
 	}
-	data := make([]byte, chunk.length)
+	data := make([]byte, chunk.Length)
 	_, err := cs.readChunk(args.Handle, 0, data)
 	if err != nil {
 		return err
 	}
 	var reply_ gfs.ApplyCopyReply
 	err = util.Call(args.Address, "ChunkServer.RPCApplyCopy",
-		gfs.ApplyCopyArg{Handle: args.Handle, Data: data, Version: chunk.version}, &reply_)
+		gfs.ApplyCopyArg{Handle: args.Handle, Data: data, Version: chunk.Version}, &reply_)
 	return err
 }
 
@@ -351,10 +440,10 @@ func (cs *ChunkServer) RPCApplyCopy(args gfs.ApplyCopyArg, reply *gfs.ApplyCopyR
 	if err != nil {
 		return err
 	}
-	chunk.Lock()
-	chunk.version = args.Version
-	chunk.length = gfs.Offset(len(args.Data))
-	chunk.Unlock()
+	chunk.lock.Lock()
+	chunk.Version = args.Version
+	chunk.Length = gfs.Offset(len(args.Data))
+	chunk.lock.Unlock()
 	return nil
 }
 

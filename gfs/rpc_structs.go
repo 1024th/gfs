@@ -6,6 +6,19 @@ import (
 
 //------ ChunkServer
 
+type ReportChunksArg struct{}
+
+type ChunkInfo struct {
+	Handle        ChunkHandle
+	Length        Offset
+	Version       ChunkVersion // version number of the chunk in disk
+	NewestVersion ChunkVersion // allocated newest version number
+}
+
+type ReportChunksReply struct {
+	Chunks []ChunkInfo
+}
+
 type PushDataAndForwardArg struct {
 	Handle    ChunkHandle
 	Data      []byte

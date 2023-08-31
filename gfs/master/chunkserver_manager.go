@@ -42,7 +42,7 @@ func (csm *chunkServerManager) getSortedServers() []gfs.ServerAddress {
 }
 
 // Hearbeat marks the chunkserver alive for now.
-func (csm *chunkServerManager) Heartbeat(addr gfs.ServerAddress) {
+func (csm *chunkServerManager) Heartbeat(addr gfs.ServerAddress) (isNew bool) {
 	csm.Lock()
 	defer csm.Unlock()
 	server, ok := csm.servers[addr]
@@ -54,6 +54,7 @@ func (csm *chunkServerManager) Heartbeat(addr gfs.ServerAddress) {
 		csm.servers[addr] = server
 	}
 	server.lastHeartbeat = time.Now()
+	return !ok
 }
 
 // AddChunk creates a chunk on given chunkservers

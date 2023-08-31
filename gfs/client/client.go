@@ -6,8 +6,24 @@ import (
 	"gfs/util"
 	"io"
 	"math/rand"
+	"time"
 
 	"github.com/sirupsen/logrus"
+)
+
+const (
+	// ReadRetryNum is the maximum number of retries for a read operation.
+	ReadRetryNum = 3
+	// ReadRetryInterval is the interval between retries for a read operation.
+	ReadRetryInterval = gfs.ServerTimeout
+	// ModifyRetryNum is the maximum number of retries for a modify operation.
+	// (e.g. write, append)
+	ModifyRetryNum = 3
+	// ModifyRetryInterval is the interval between retries for a modify operation.
+	ModifyRetryInterval = gfs.ServerTimeout
+	// AppendCreateRetryNum is the maximum number of retries for creating a new chunk
+	// for an append operation.
+	AppendCreateRetryNum = 2
 )
 
 // Client struct is the GFS client-side driver
@@ -77,7 +93,15 @@ func (c *Client) Read(path gfs.Path, offset gfs.Offset, data []byte) (n int, err
 
 		len := int(min(gfs.MaxChunkSize-chunkOffset, end-offset))
 		buf := make([]byte, len)
-		read_len, err := c.ReadChunk(chunkHandle, chunkOffset, buf)
+		var read_len int
+		for i := 0; i < ReadRetryNum; i++ {
+			read_len, err = c.ReadChunk(chunkHandle, chunkOffset, buf)
+			if err == nil || err == io.EOF {
+				break
+			}
+			logrus.Warnf("Read error: %v, retrying for %v times", err, ReadRetryNum-i)
+			time.Sleep(ReadRetryInterval)
+		}
 		copy(data[n:], buf[:read_len])
 		n += read_len
 		if err != nil {
@@ -115,7 +139,13 @@ func (c *Client) Write(path gfs.Path, offset gfs.Offset, data []byte) error {
 
 		len := min(gfs.MaxChunkSize-chunkOffset, end-cur_offset)
 		buf := data[cur_offset-offset : cur_offset-offset+len]
-		err = c.WriteChunk(chunkHandle, chunkOffset, buf)
+		for i := 0; i < ModifyRetryNum; i++ {
+			err = c.WriteChunk(chunkHandle, chunkOffset, buf)
+			if err == nil {
+				break
+			}
+			time.Sleep(ModifyRetryInterval)
+		}
 		if err != nil {
 			return err
 		}
@@ -136,27 +166,37 @@ func (c *Client) Append(path gfs.Path, data []byte) (offset gfs.Offset, err erro
 	}
 
 	var chunkIdx gfs.ChunkIndex
+	var chunkOffset gfs.Offset
 	if file_info.Chunks == 0 {
 		chunkIdx = 0
 	} else {
 		chunkIdx = gfs.ChunkIndex(file_info.Chunks - 1)
 	}
-	for {
+	maxIdx := chunkIdx + gfs.ChunkIndex(AppendCreateRetryNum)
+	for chunkIdx <= maxIdx {
 		// If the append causes the last chunk to exceed the max chunk size,
 		// create a new chunk and append to it.
 		chunkHandle, err := c.GetChunkHandle(path, chunkIdx)
 		if err != nil {
 			return 0, err
 		}
-		chunkOffset, err := c.AppendChunk(chunkHandle, data)
+		for i := 0; i < ModifyRetryNum; i++ {
+			chunkOffset, err = c.AppendChunk(chunkHandle, data)
+			if err == nil || gfs.GetErrorCode(err) == gfs.AppendExceedChunkSize {
+				break
+			}
+			logrus.Warnf("Append error: %v, retrying for %v times", err, ModifyRetryNum-i)
+			time.Sleep(ModifyRetryInterval)
+		}
 		offset = gfs.Offset(chunkIdx)*gfs.MaxChunkSize + chunkOffset
 		if err == nil || gfs.GetErrorCode(err) != gfs.AppendExceedChunkSize {
 			return offset, err
 		}
 		// Error is AppendExceedChunkSize, create a new chunk and retry.
 		chunkIdx++
-		logrus.Infof("Appending to a new chunk %v of file %v", chunkIdx, path)
+		logrus.Warnf("Appending to a new chunk %v of file %v", chunkIdx, path)
 	}
+	return 0, fmt.Errorf("Append failed after %v retries of creating new chunks", AppendCreateRetryNum)
 }
 
 // chooseServer randomly chooses a server from the list.
