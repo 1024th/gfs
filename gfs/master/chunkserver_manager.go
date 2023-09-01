@@ -5,8 +5,11 @@ import (
 	"gfs"
 	"gfs/util"
 	"sort"
-	"sync"
+
+	// "sync"
 	"time"
+
+	sync "github.com/sasha-s/go-deadlock"
 )
 
 // chunkServerManager manages chunkservers

@@ -9,14 +9,22 @@ import (
 type ReportChunksArg struct{}
 
 type ChunkInfo struct {
-	Handle        ChunkHandle
-	Length        Offset
-	Version       ChunkVersion // version number of the chunk in disk
-	NewestVersion ChunkVersion // allocated newest version number
+	Handle  ChunkHandle
+	Length  Offset
+	Version ChunkVersion // version number of the chunk in disk
 }
 
 type ReportChunksReply struct {
 	Chunks []ChunkInfo
+}
+
+type CheckVersionArg struct {
+	Handle  ChunkHandle
+	Version ChunkVersion // chunk version recorded in master
+}
+
+type CheckVersionReply struct {
+	Version ChunkVersion // chunk version recorded in chunkserver
 }
 
 type PushDataAndForwardArg struct {
@@ -63,10 +71,9 @@ type AppendChunkReply struct {
 }
 
 type ApplyMutationArg struct {
-	Mtype   MutationType
-	Version ChunkVersion
-	DataID  DataBufferID
-	Offset  Offset
+	Mtype  MutationType
+	DataID DataBufferID
+	Offset Offset
 }
 type ApplyMutationReply struct {
 	Err ErrorCode
@@ -116,6 +123,12 @@ type HeartbeatArg struct {
 	//       so that the master can detect orphaned chunks and do garbage collection
 }
 type HeartbeatReply struct{}
+
+type TriggerReportChunksArg struct {
+	Address ServerAddress
+}
+
+type TriggerReportChunksReply struct{}
 
 type GetPrimaryAndSecondariesArg struct {
 	Handle ChunkHandle

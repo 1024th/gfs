@@ -182,20 +182,30 @@ func (m *Master) BackgroundActivity() error {
 	dead := m.csm.DetectDeadServers()
 	for _, addr := range dead {
 		log.Warnf("Chunkserver %v is dead", addr)
-		handles, err := m.csm.RemoveServer(addr)
+		err := m.RemoveServer(addr)
 		if err != nil {
 			return err
 		}
-		for _, handle := range handles {
-			n, err := m.cm.RemoveReplica(handle, addr)
+	}
+	return nil
+}
+
+// RemoveServer removes a chunkserver. It removes related metadata and performs
+// re-replication if necessary.
+func (m *Master) RemoveServer(addr gfs.ServerAddress) error {
+	handles, err := m.csm.RemoveServer(addr)
+	if err != nil {
+		return err
+	}
+	for _, handle := range handles {
+		n, err := m.cm.RemoveReplica(handle, addr)
+		if err != nil {
+			return err
+		}
+		if n < gfs.MinimumNumReplicas {
+			err := m.ReReplicate(handle)
 			if err != nil {
 				return err
-			}
-			if n < gfs.MinimumNumReplicas {
-				err := m.ReReplicate(handle)
-				if err != nil {
-					return err
-				}
 			}
 		}
 	}
@@ -240,20 +250,47 @@ func (m *Master) RPCHeartbeat(args gfs.HeartbeatArg, reply *gfs.HeartbeatReply) 
 		}
 	}
 	if isNew {
-		// Ask the chunkserver to report all the chunks it has
-		log.Infof("New chunkserver %v, asking for chunks", args.Address)
-		var reply gfs.ReportChunksReply
-		err := util.Call(args.Address, "ChunkServer.RPCReportChunks", gfs.ReportChunksArg{}, &reply)
+		err := m.askChunkserverForChunks(args.Address)
 		if err != nil {
 			return err
 		}
-		for _, info := range reply.Chunks {
-			err := m.cm.RegisterReplica(info.Handle, args.Address)
-			if err != nil {
-				return err
-			}
+	}
+	return nil
+}
+
+// askChunkserverForChunks asks a chunkserver to report all the chunks it has
+// and register them to the master.
+func (m *Master) askChunkserverForChunks(addr gfs.ServerAddress) error {
+	var reply gfs.ReportChunksReply
+	err := util.Call(addr, "ChunkServer.RPCReportChunks", gfs.ReportChunksArg{}, &reply)
+	if err != nil {
+		return err
+	}
+	for _, info := range reply.Chunks {
+		err := m.cm.RegisterReplica(info.Handle, addr)
+		if err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+// RPCTriggerReportChunks is called by chunkserver. It means that the master
+// should clear the chunkserver's chunk list and ask it to report all the
+// chunks it has.
+func (m *Master) RPCTriggerReportChunks(args gfs.TriggerReportChunksArg, reply *gfs.TriggerReportChunksReply) error {
+	log.Infof("%v TriggerReportChunks", args.Address)
+	err := m.RemoveServer(args.Address)
+	if err != nil {
+		return err
+	}
+	log.Infof("%v TriggerReportChunks, After RemoveServer", args.Address)
+	m.csm.Heartbeat(args.Address)
+	err = m.askChunkserverForChunks(args.Address)
+	if err != nil {
+		return err
+	}
+	log.Infof("After TriggerReportChunks, chunkserver %v has: %v", args.Address, m.csm.servers[args.Address].chunks)
 	return nil
 }
 
@@ -267,6 +304,7 @@ func (m *Master) RPCGetPrimaryAndSecondaries(args gfs.GetPrimaryAndSecondariesAr
 	reply.Primary = p.primary
 	reply.Expire = p.expire
 	reply.Secondaries = p.secondaries
+	log.Infof("RPCGetPrimaryAndSecondaries of %v: %v", args.Handle, *reply)
 	return nil
 }
 
@@ -330,6 +368,7 @@ func (m *Master) RPCGetChunkHandle(args gfs.GetChunkHandleArg, reply *gfs.GetChu
 			// create a new chunk
 			log.Infof("Creating a new chunk for %v", args.Path)
 			addrs, err := m.csm.ChooseServers(gfs.DefaultNumReplicas)
+			log.Infof("Chosen servers: %v", addrs)
 			if err != nil {
 				return err
 			}

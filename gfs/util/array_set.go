@@ -43,6 +43,21 @@ func (s *ArraySet[T]) Add(element T) {
 	s.arr = append(s.arr, element)
 }
 
+// AddAll adds all elements of a slice to the set.
+func (s *ArraySet[T]) AddAll(elements []T) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	for _, element := range elements {
+		for _, v := range s.arr {
+			if v == element {
+				goto next
+			}
+		}
+		s.arr = append(s.arr, element)
+	next:
+	}
+}
+
 // Delete delete an element in the set.
 func (s *ArraySet[T]) Delete(element T) {
 	s.lock.Lock()
@@ -53,6 +68,13 @@ func (s *ArraySet[T]) Delete(element T) {
 			break
 		}
 	}
+}
+
+// Clear clears the set.
+func (s *ArraySet[T]) Clear() {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	s.arr = make([]T, 0)
 }
 
 // Size returns the size of the set.

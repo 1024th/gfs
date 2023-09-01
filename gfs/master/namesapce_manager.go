@@ -3,7 +3,10 @@ package master
 import (
 	"fmt"
 	"gfs"
-	"sync"
+
+	// "sync"
+
+	sync "github.com/sasha-s/go-deadlock"
 )
 
 type namespaceManager struct {

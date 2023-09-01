@@ -20,7 +20,7 @@ const (
 	// (e.g. write, append)
 	ModifyRetryNum = 3
 	// ModifyRetryInterval is the interval between retries for a modify operation.
-	ModifyRetryInterval = gfs.ServerTimeout
+	ModifyRetryInterval = gfs.LeaseExpire
 	// AppendCreateRetryNum is the maximum number of retries for creating a new chunk
 	// for an append operation.
 	AppendCreateRetryNum = 2

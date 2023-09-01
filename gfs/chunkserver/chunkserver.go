@@ -2,14 +2,18 @@ package chunkserver
 
 import (
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/rpc"
 	"os"
 	"path"
-	"sync"
+
+	// "sync"
 	"time"
+
+	sync "github.com/sasha-s/go-deadlock"
 
 	log "github.com/sirupsen/logrus"
 
@@ -33,20 +37,33 @@ type ChunkServer struct {
 }
 
 type ChunkInfo struct {
-	lock          sync.RWMutex
-	Length        gfs.Offset
-	Version       gfs.ChunkVersion // version number of the chunk in disk
-	NewestVersion gfs.ChunkVersion // allocated newest version number
+	lock    sync.RWMutex
+	Length  gfs.Offset
+	Version gfs.ChunkVersion // version number of the chunk in disk
 }
 
 const (
 	metadataFilename = "chunkserver.meta"
 )
 
-// loadMetadata loads metadata from disk
-func (cs *ChunkServer) loadMetadata() error {
+// checkChunkFiles checks the chunk files in the server root directory.
+// Currently it only checks if the file exists.
+// TODO: add checksum
+func (cs *ChunkServer) checkChunkFiles() {
 	cs.chunkLock.Lock()
 	defer cs.chunkLock.Unlock()
+	for handle := range cs.chunk {
+		chunkpath := path.Join(cs.serverRoot, fmt.Sprintf("%v", handle))
+		info, err := os.Stat(chunkpath)
+		if err != nil || info.IsDir() {
+			log.Warnf("[%v] checkChunkFiles: chunk %v error", cs.address, handle)
+			delete(cs.chunk, handle)
+		}
+	}
+}
+
+// loadMetadata loads metadata from disk
+func (cs *ChunkServer) loadMetadata() error {
 
 	name := path.Join(cs.serverRoot, metadataFilename)
 	f, err := os.Open(name)
@@ -62,16 +79,10 @@ func (cs *ChunkServer) loadMetadata() error {
 		return err
 	}
 
-	// check if the chunk files exist
-	for handle := range tmp {
-		chunkpath := path.Join(cs.serverRoot, fmt.Sprintf("%v", handle))
-		info, err := os.Stat(chunkpath)
-		if err == nil && !info.IsDir() {
-			cs.chunk[handle] = tmp[handle]
-		} else {
-			log.Warnf("chunk %v not found", handle)
-		}
-	}
+	cs.chunkLock.Lock()
+	cs.chunk = tmp
+	cs.chunkLock.Unlock()
+	cs.checkChunkFiles()
 	return nil
 }
 
@@ -198,11 +209,37 @@ func (cs *ChunkServer) RPCReportChunks(args gfs.ReportChunksArg, reply *gfs.Repo
 	defer cs.chunkLock.RUnlock()
 	for handle, chunk := range cs.chunk {
 		reply.Chunks = append(reply.Chunks, gfs.ChunkInfo{
-			Handle:        handle,
-			Length:        chunk.Length,
-			Version:       chunk.Version,
-			NewestVersion: chunk.NewestVersion,
+			Handle:  handle,
+			Length:  chunk.Length,
+			Version: chunk.Version,
 		})
+	}
+	return nil
+}
+
+// triggerReportChunks triggers the master to ask this chunkserver for chunks.
+func (cs *ChunkServer) triggerReportChunks() error {
+	return util.Call(cs.master, "Master.RPCTriggerReportChunks",
+		gfs.TriggerReportChunksArg{Address: cs.address}, nil)
+}
+
+// RPCCheckVersion is called by master to check the version of a chunk.
+// If the version matches, it increments the version number recorded in the chunkserver.
+func (cs *ChunkServer) RPCCheckVersion(args gfs.CheckVersionArg, reply *gfs.CheckVersionReply) error {
+	log.Infof("[%v] RPCCheckVersion: chunk %v want %v", cs.address, args.Handle, args.Version)
+	cs.chunkLock.RLock()
+	chunk, ok := cs.chunk[args.Handle]
+	cs.chunkLock.RUnlock()
+	if !ok {
+		return fmt.Errorf("chunk %v not found", args.Handle)
+	}
+	chunk.lock.Lock()
+	defer chunk.lock.Unlock()
+	reply.Version = chunk.Version
+	if chunk.Version == args.Version {
+		chunk.Version++
+	} else {
+		log.Errorf("[%v] chunk %v (%p) version mismatch: local %v, master %v", cs.address, args.Handle, chunk, chunk.Version, args.Version)
 	}
 	return nil
 }
@@ -237,11 +274,15 @@ func (cs *ChunkServer) RPCForwardData(args gfs.ForwardDataArg, reply *gfs.Forwar
 func (cs *ChunkServer) RPCCreateChunk(args gfs.CreateChunkArg, reply *gfs.CreateChunkReply) error {
 	cs.chunkLock.Lock()
 	defer cs.chunkLock.Unlock()
-	cs.chunk[args.Handle] = &ChunkInfo{
-		Length:        0,
-		Version:       0,
-		NewestVersion: 0,
+	_, ok := cs.chunk[args.Handle]
+	if ok {
+		return fmt.Errorf("chunk %v already exists", args.Handle)
 	}
+	cs.chunk[args.Handle] = &ChunkInfo{
+		Length:  0,
+		Version: 0,
+	}
+	log.Infof("[%v] create chunk %v (%p)", cs.address, args.Handle, cs.chunk[args.Handle])
 	return nil
 }
 
@@ -262,7 +303,7 @@ func (cs *ChunkServer) RPCReadChunk(args gfs.ReadChunkArg, reply *gfs.ReadChunkR
 // applyMutationTo asks secondaries to apply the mutation.
 // If any of the secondaries fails, it returns the error.
 func (cs *ChunkServer) applyMutationTo(secondaries []gfs.ServerAddress, m gfs.ApplyMutationArg) error {
-	log.Info("Secondaries: ", secondaries)
+	log.Infof("[%v] applyMutationTo secondaries: %v", cs.address, secondaries)
 	errs := util.CallAll(secondaries, "ChunkServer.RPCApplyMutation", m)
 	for _, err := range errs {
 		if err != nil {
@@ -333,8 +374,7 @@ func (cs *ChunkServer) RPCAppendChunk(args gfs.AppendChunkArg, reply *gfs.Append
 	chunk.lock.Lock()
 	defer chunk.lock.Unlock()
 	m := gfs.ApplyMutationArg{
-		DataID:  args.DataID,
-		Version: chunk.Version, // TODO
+		DataID: args.DataID,
 	}
 	if chunk.Length+gfs.Offset(len(data)) > gfs.MaxChunkSize {
 		// pad current chunk
@@ -416,6 +456,8 @@ func (cs *ChunkServer) RPCSendCopy(args gfs.SendCopyArg, reply *gfs.SendCopyRepl
 	if !ok {
 		return fmt.Errorf("chunk %v not found", args.Handle)
 	}
+	chunk.lock.RLock()
+	defer chunk.lock.RUnlock()
 	data := make([]byte, chunk.Length)
 	_, err := cs.readChunk(args.Handle, 0, data)
 	if err != nil {
@@ -423,7 +465,10 @@ func (cs *ChunkServer) RPCSendCopy(args gfs.SendCopyArg, reply *gfs.SendCopyRepl
 	}
 	var reply_ gfs.ApplyCopyReply
 	err = util.Call(args.Address, "ChunkServer.RPCApplyCopy",
-		gfs.ApplyCopyArg{Handle: args.Handle, Data: data, Version: chunk.Version}, &reply_)
+		gfs.ApplyCopyArg{
+			Handle:  args.Handle,
+			Data:    data,
+			Version: chunk.Version}, &reply_)
 	return err
 }
 
@@ -443,6 +488,7 @@ func (cs *ChunkServer) RPCApplyCopy(args gfs.ApplyCopyArg, reply *gfs.ApplyCopyR
 	chunk.lock.Lock()
 	chunk.Version = args.Version
 	chunk.Length = gfs.Offset(len(args.Data))
+	log.Infof("[%v] apply copy: chunk %v (%p) version %v length %v", cs.address, args.Handle, chunk, chunk.Version, chunk.Length)
 	chunk.lock.Unlock()
 	return nil
 }
@@ -464,10 +510,16 @@ func (cs *ChunkServer) readChunk(handle gfs.ChunkHandle, offset gfs.Offset, b []
 	chunkpath := path.Join(cs.serverRoot, fmt.Sprintf("%v", handle))
 	f, err := os.Open(chunkpath)
 	if err != nil {
+		log.Warnf("[%v] readChunk: chunk %v error: %v", cs.address, handle, err)
+		go cs.selfCheck()
 		return 0, err
 	}
 	defer f.Close()
 	n, err = f.ReadAt(b, int64(offset))
+	if err != nil && err != io.EOF {
+		log.Warnf("[%v] readChunk: chunk %v error: %v", cs.address, handle, err)
+		go cs.selfCheck()
+	}
 	return
 }
 
@@ -482,9 +534,43 @@ func (cs *ChunkServer) writeFile(handle gfs.ChunkHandle, offset gfs.Offset, data
 	chunkpath := path.Join(cs.serverRoot, fmt.Sprintf("%v", handle))
 	f, err := os.OpenFile(chunkpath, os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
+		log.Warnf("[%v] writeFile: chunk %v error: %v", cs.address, handle, err)
+		go cs.selfCheck()
 		return err
 	}
 	defer f.Close()
 	_, err = f.WriteAt(data, int64(offset))
+	if err != nil {
+		log.Warnf("[%v] writeFile: chunk %v error: %v", cs.address, handle, err)
+		go cs.selfCheck()
+	}
 	return err
+}
+
+// selfCheck checks the chunk files and triggers report chunks to master.
+// This is called when disk error is detected.
+func (cs *ChunkServer) selfCheck() {
+	log.Warnf("[%v] self check", cs.address)
+
+	// check server root directory
+	info, err := os.Stat(cs.serverRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		log.Errorf("[%v] root dir not found, creating...", cs.address)
+		err := os.Mkdir(cs.serverRoot, 0755)
+		if err != nil {
+			log.Fatalf("[%v] create root dir error: %v", cs.address, err)
+		}
+	} else if err != nil {
+		log.Errorf("[%v] root dir error: %v", cs.address, err)
+	} else if !info.IsDir() {
+		log.Fatalf("[%v] root is not a directory", cs.address)
+	}
+
+	cs.checkChunkFiles()
+	log.Infof("[%v] self check: chunk files done, trigger report chunks", cs.address)
+	err = cs.triggerReportChunks()
+	if err != nil {
+		log.Error("trigger report chunks error: ", err)
+	}
+	log.Infof("[%v] self check done", cs.address)
 }
