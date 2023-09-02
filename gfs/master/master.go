@@ -255,6 +255,8 @@ func (m *Master) RPCHeartbeat(args gfs.HeartbeatArg, reply *gfs.HeartbeatReply) 
 			return err
 		}
 	}
+	reply.Garbage = m.csm.GetGarbage(args.Address)
+	m.csm.ClearGarbage(args.Address)
 	return nil
 }
 
@@ -297,7 +299,10 @@ func (m *Master) RPCTriggerReportChunks(args gfs.TriggerReportChunksArg, reply *
 // RPCGetPrimaryAndSecondaries returns lease holder and secondaries of a chunk.
 // If no one holds the lease currently, grant one.
 func (m *Master) RPCGetPrimaryAndSecondaries(args gfs.GetPrimaryAndSecondariesArg, reply *gfs.GetPrimaryAndSecondariesReply) error {
-	p, err := m.cm.GetLeaseHolder(args.Handle)
+	p, stale, err := m.cm.GetLeaseHolder(args.Handle)
+	for _, addr := range stale {
+		m.csm.AddGarbage(addr, args.Handle)
+	}
 	if err != nil {
 		return err
 	}

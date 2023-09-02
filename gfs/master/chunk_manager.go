@@ -111,13 +111,14 @@ func (cm *chunkManager) GetChunk(path gfs.Path, index gfs.ChunkIndex) (gfs.Chunk
 	return file_info.Handles[index], nil
 }
 
-// checkVersion checks if the chunk version recorded in chunkservers
-// matches the version recorded in master. If there exists a replica
-// with correct version, update the chunk version and replica locations
-// in master. It assumes that the caller holds the write lock of chunk_info.
-func (cm *chunkManager) checkVersion(handle gfs.ChunkHandle, chunk_info *ChunkInfo) error {
+// checkVersion checks if the chunk version recorded in chunkservers matches
+// the version recorded in master. If there exists a replica with correct
+// version, update the chunk version and replica locations in master.
+// It assumes that the caller holds the write lock of chunk_info.
+func (cm *chunkManager) checkVersion(handle gfs.ChunkHandle, chunk_info *ChunkInfo) (staleServers []gfs.ServerAddress, err error) {
 	loc := chunk_info.Location.GetAll()
 	newLoc := ServerSet{}
+	staleLoc := ServerSet{}
 	var wg sync.WaitGroup
 	for _, addr := range loc {
 		wg.Add(1)
@@ -137,6 +138,7 @@ func (cm *chunkManager) checkVersion(handle gfs.ChunkHandle, chunk_info *ChunkIn
 			} else {
 				log.Warnf("chunk version mismatch: %v", addr)
 				// TODO: delete chunk (GC)
+				staleLoc.Add(addr)
 			}
 		}(addr)
 	}
@@ -148,39 +150,36 @@ func (cm *chunkManager) checkVersion(handle gfs.ChunkHandle, chunk_info *ChunkIn
 		chunk_info.Location.AddAll(newLoc.GetAll())
 	} else {
 		log.Errorf("no replica with correct version")
-		return fmt.Errorf("no replica with correct version")
+		return nil, fmt.Errorf("no replica with correct version")
 	}
-	return nil
+	return staleLoc.GetAll(), nil
 }
 
 // GetLeaseHolder returns the chunkserver that hold the lease of a chunk
 // (i.e. primary) and expire time of the lease. If no one has a lease,
 // grants one to a replica it chooses.
-func (cm *chunkManager) GetLeaseHolder(handle gfs.ChunkHandle) (*lease, error) {
+func (cm *chunkManager) GetLeaseHolder(handle gfs.ChunkHandle) (l *lease, stale []gfs.ServerAddress, err error) {
 	cm.RLock()
 	defer cm.RUnlock()
 	chunk_info, ok := cm.chunk[handle]
 	if !ok {
-		return nil, fmt.Errorf("chunk %v not found", handle)
+		return nil, nil, fmt.Errorf("chunk %v not found", handle)
 	}
-	chunk_info.lock.RLock()
-	defer chunk_info.lock.RUnlock()
+	chunk_info.lock.Lock()
+	defer chunk_info.lock.Unlock()
 	if chunk_info.Primary == "" ||
 		chunk_info.Expire.Before(time.Now()) { // no one has a lease, grant a new one
-		chunk_info.lock.RUnlock()
-		chunk_info.lock.Lock()
-		err := cm.checkVersion(handle, chunk_info)
+		log.Infof("new lease for chunk %v (%p), old primary: %v, expire: %v", handle, chunk_info, chunk_info.Primary, chunk_info.Expire)
+		stale, err = cm.checkVersion(handle, chunk_info)
 		if err == nil {
 			chunk_info.Primary = chunk_info.Location.RandomPick()
 			chunk_info.Expire = time.Now().Add(gfs.LeaseExpire)
 		}
-		chunk_info.lock.Unlock()
-		chunk_info.lock.RLock()
 		if err != nil {
-			return nil, err
+			return nil, stale, err
 		}
 	}
-	l := lease{
+	l = &lease{
 		primary: chunk_info.Primary,
 		expire:  chunk_info.Expire,
 	}
@@ -191,7 +190,7 @@ func (cm *chunkManager) GetLeaseHolder(handle gfs.ChunkHandle) (*lease, error) {
 			l.secondaries = append(l.secondaries, svr_addr)
 		}
 	}
-	return &l, nil
+	return l, stale, nil
 }
 
 // ExtendLease extends the lease of chunk if the lease holder is primary.

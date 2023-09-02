@@ -28,6 +28,7 @@ func newChunkServerManager() *chunkServerManager {
 type chunkServerInfo struct {
 	lastHeartbeat time.Time
 	chunks        map[gfs.ChunkHandle]bool // set of chunks that the chunkserver has
+	garbage       map[gfs.ChunkHandle]bool // set of garbage chunks
 }
 
 // GetSortedServers returns a list of chunkservers sorted by the number of chunks they have in ascending order.
@@ -77,6 +78,37 @@ func (csm *chunkServerManager) AddChunk(addrs []gfs.ServerAddress, handle gfs.Ch
 		csm.servers[addr].chunks[handle] = true
 	}
 	return nil
+}
+
+// AddGarbage adds a chunk to garbage list of a chunkserver
+func (csm *chunkServerManager) AddGarbage(addr gfs.ServerAddress, handle gfs.ChunkHandle) error {
+	csm.Lock()
+	defer csm.Unlock()
+	server, ok := csm.servers[addr]
+	if !ok {
+		return fmt.Errorf("chunkserver %s not found", addr)
+	}
+	server.garbage[handle] = true
+	return nil
+}
+
+// GetGarbage returns the garbage chunks of a chunkserver
+func (csm *chunkServerManager) GetGarbage(addr gfs.ServerAddress) (garbage []gfs.ChunkHandle) {
+	csm.RLock()
+	defer csm.RUnlock()
+	server := csm.servers[addr]
+	for handle := range server.garbage {
+		garbage = append(garbage, handle)
+	}
+	return garbage
+}
+
+// ClearGarbage clears the garbage chunks of a chunkserver
+func (csm *chunkServerManager) ClearGarbage(addr gfs.ServerAddress) {
+	csm.Lock()
+	defer csm.Unlock()
+	server := csm.servers[addr]
+	server.garbage = make(map[gfs.ChunkHandle]bool)
 }
 
 // ChooseReReplication chooses servers to perform re-replication

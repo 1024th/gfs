@@ -34,6 +34,7 @@ type ChunkServer struct {
 	pendingLeaseExtensions *util.ArraySet[gfs.ChunkHandle] // pending lease extension
 	chunk                  map[gfs.ChunkHandle]*ChunkInfo  // chunk information
 	chunkLock              sync.RWMutex
+	garbage                map[gfs.ChunkHandle]bool // set of garbage chunks
 }
 
 type ChunkInfo struct {
@@ -43,7 +44,8 @@ type ChunkInfo struct {
 }
 
 const (
-	metadataFilename = "chunkserver.meta"
+	GarbageCollectInterval = 10 * time.Second
+	metadataFilename       = "chunkserver.meta"
 )
 
 // checkChunkFiles checks the chunk files in the server root directory.
@@ -53,7 +55,7 @@ func (cs *ChunkServer) checkChunkFiles() {
 	cs.chunkLock.Lock()
 	defer cs.chunkLock.Unlock()
 	for handle := range cs.chunk {
-		chunkpath := path.Join(cs.serverRoot, fmt.Sprintf("%v", handle))
+		chunkpath := cs.getChunkPath(handle)
 		info, err := os.Stat(chunkpath)
 		if err != nil || info.IsDir() {
 			log.Warnf("[%v] checkChunkFiles: chunk %v error", cs.address, handle)
@@ -64,7 +66,6 @@ func (cs *ChunkServer) checkChunkFiles() {
 
 // loadMetadata loads metadata from disk
 func (cs *ChunkServer) loadMetadata() error {
-
 	name := path.Join(cs.serverRoot, metadataFilename)
 	f, err := os.Open(name)
 	if err != nil {
@@ -171,22 +172,63 @@ func NewAndServe(addr, masterAddr gfs.ServerAddress, serverRoot string) *ChunkSe
 				return
 			default:
 			}
-			le := cs.pendingLeaseExtensions.GetAllAndClear()
-			args := &gfs.HeartbeatArg{
-				Address:         addr,
-				LeaseExtensions: le,
-			}
-			if err := util.Call(cs.master, "Master.RPCHeartbeat", args, nil); err != nil {
-				log.Error("heartbeat rpc error ", err)
-			}
-
+			cs.heartbeat()
 			time.Sleep(gfs.HeartbeatInterval)
+		}
+	}()
+
+	// Garbage collection
+	go func() {
+		for {
+			select {
+			case <-cs.shutdown:
+				return
+			default:
+			}
+			cs.garbageCollect()
+			time.Sleep(GarbageCollectInterval)
 		}
 	}()
 
 	log.Infof("ChunkServer is now running. addr = %v, root path = %v, master addr = %v", addr, serverRoot, masterAddr)
 
 	return cs
+}
+
+func (cs *ChunkServer) heartbeat() {
+	le := cs.pendingLeaseExtensions.GetAllAndClear()
+	args := &gfs.HeartbeatArg{
+		Address:         cs.address,
+		LeaseExtensions: le,
+	}
+	var reply gfs.HeartbeatReply
+	err := util.Call(cs.master, "Master.RPCHeartbeat", args, &reply)
+	if err != nil {
+		log.Error("heartbeat rpc error ", err)
+	}
+	// add garbage chunks
+	cs.chunkLock.Lock()
+	for _, handle := range reply.Garbage {
+		cs.garbage[handle] = true
+	}
+	cs.chunkLock.Unlock()
+}
+
+// garbageCollect removes the chunks that are not in the master's record.
+func (cs *ChunkServer) garbageCollect() {
+	log.Infof("[%v] garbageCollect", cs.address)
+	cs.chunkLock.Lock()
+	defer cs.chunkLock.Unlock()
+	for handle := range cs.garbage {
+		log.Infof("[%v] garbageCollect: remove chunk %v", cs.address, handle)
+		chunkpath := cs.getChunkPath(handle)
+		err := os.Remove(chunkpath)
+		if err != nil {
+			log.Errorf("[%v] garbageCollect: remove chunk %v error: %v", cs.address, handle, err)
+		}
+		delete(cs.chunk, handle)
+		delete(cs.garbage, handle)
+	}
 }
 
 // Shutdown shuts the chunkserver down
@@ -304,6 +346,7 @@ func (cs *ChunkServer) RPCReadChunk(args gfs.ReadChunkArg, reply *gfs.ReadChunkR
 // If any of the secondaries fails, it returns the error.
 func (cs *ChunkServer) applyMutationTo(secondaries []gfs.ServerAddress, m gfs.ApplyMutationArg) error {
 	log.Infof("[%v] applyMutationTo secondaries: %v", cs.address, secondaries)
+	defer log.Infof("[%v] applyMutationTo secondaries %v done", cs.address, secondaries)
 	errs := util.CallAll(secondaries, "ChunkServer.RPCApplyMutation", m)
 	for _, err := range errs {
 		if err != nil {
@@ -507,7 +550,7 @@ func (cs *ChunkServer) readChunk(handle gfs.ChunkHandle, offset gfs.Offset, b []
 	// 	return 0, fmt.Errorf("offset+length exceeds chunk length %v", chunk.length)
 	// }
 	// Should return EOF?
-	chunkpath := path.Join(cs.serverRoot, fmt.Sprintf("%v", handle))
+	chunkpath := cs.getChunkPath(handle)
 	f, err := os.Open(chunkpath)
 	if err != nil {
 		log.Warnf("[%v] readChunk: chunk %v error: %v", cs.address, handle, err)
@@ -523,6 +566,11 @@ func (cs *ChunkServer) readChunk(handle gfs.ChunkHandle, offset gfs.Offset, b []
 	return
 }
 
+// getChunkPath returns the path to the chunk file.
+func (cs *ChunkServer) getChunkPath(handle gfs.ChunkHandle) string {
+	return path.Join(cs.serverRoot, fmt.Sprintf("%v", handle))
+}
+
 func max(a, b gfs.Offset) gfs.Offset {
 	if a > b {
 		return a
@@ -531,7 +579,7 @@ func max(a, b gfs.Offset) gfs.Offset {
 }
 
 func (cs *ChunkServer) writeFile(handle gfs.ChunkHandle, offset gfs.Offset, data []byte) error {
-	chunkpath := path.Join(cs.serverRoot, fmt.Sprintf("%v", handle))
+	chunkpath := cs.getChunkPath(handle)
 	f, err := os.OpenFile(chunkpath, os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
 		log.Warnf("[%v] writeFile: chunk %v error: %v", cs.address, handle, err)

@@ -122,7 +122,9 @@ type HeartbeatArg struct {
 	// TODO: report a subset of the chunks that are stored on this chunkserver
 	//       so that the master can detect orphaned chunks and do garbage collection
 }
-type HeartbeatReply struct{}
+type HeartbeatReply struct {
+	Garbage []ChunkHandle
+}
 
 type TriggerReportChunksArg struct {
 	Address ServerAddress

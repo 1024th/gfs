@@ -32,9 +32,7 @@ func newDownloadBuffer(expire, tick time.Duration) *downloadBuffer {
 
 	// cleanup
 	go func() {
-		ticker := time.Tick(tick)
-		for {
-			<-ticker
+		for range time.Tick(tick) {
 			now := time.Now()
 			buf.RLock()
 			for id, item := range buf.buffer {
