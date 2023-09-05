@@ -47,7 +47,6 @@ type PathInfo struct {
 	IsDir bool
 
 	// if it is a file
-	Length int64
 	Chunks int64
 }
 

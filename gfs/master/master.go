@@ -350,7 +350,6 @@ func (m *Master) RPCGetFileInfo(args gfs.GetFileInfoArg, reply *gfs.GetFileInfoR
 		return err
 	}
 	reply.IsDir = info.IsDir
-	reply.Length = info.Length
 	reply.Chunks = info.Chunks
 	return nil
 }

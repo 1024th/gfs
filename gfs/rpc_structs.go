@@ -161,7 +161,6 @@ type GetFileInfoArg struct {
 }
 type GetFileInfoReply struct {
 	IsDir  bool
-	Length int64
 	Chunks int64
 }
 
