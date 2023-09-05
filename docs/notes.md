@@ -42,12 +42,23 @@ Another way to store chunks distributedly is to use a distributed hash table (DH
 
 ### Atomic Record Append
 
-Maintaining consistency when multiple clients are appending to the same file is difficult. GFS provides an atomic record append operation to simplify this task.
+Maintaining consistency when multiple clients are appending to the same file is difficult. GFS provides an atomic record append operation to simplify this task. The operation appends data to the end of a file and returns the offset of the data. GFS guarantees that the
+data is written at least once as an atomic unit (i.e., a continuous sequence of bytes). This is achieved by the lease mechanism.
+
+Every mutation operation can be considered as write or append to a chunk. Since there is multiple replicas of each chunk, we need to ensure that the replicas are consistent. GFS uses a *lease* mechanism to achieve this. The master grants a lease to one of the replicas, called the *primary*. Other replicas are called *secondaries*. The primary picks a serial order for all mutations to the chunk. All replicas follow this order when applying mutations. The client interacts with the primary directly, which also minimizes the burden on the master.
 
 ## Implementation Details
 
-### Lock
+The framework given in [this lab](https://bitbucket.org/abcdabcd987/ppca-gfs/) was used as a starting point. The graybox test from the original lab was rewritten using the [assert](https://pkg.go.dev/github.com/stretchr/testify/assert) package, making it easier to debug.
+
+### Client Interface
+
+The client interface includes common file system operations: `Create`, `Mkdir`, `List`, `Read`, `Write`, `Append`. Some underlying operations are also exposed: `GetChunkHandle`, `ReadChunk`, `WriteChunk`, `AppendChunk`.
 
 ### Tree-Structure Namespace
+
+The original GFS paper uses a flat namespace: a mapping from full pathnames to metadata. This may be simple to implement, but it is not very efficient. For example, listing a directory requires listing all files and filtering out the files in the directory. We may also need prefix compression to reduce the memory usage of storing the pathnames. Therefore, in this implementation, we use a tree-structure namespace instead.
+
+### Locking
 
 To be continued...
