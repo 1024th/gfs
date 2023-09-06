@@ -59,6 +59,18 @@ The client interface includes common file system operations: `Create`, `Mkdir`, 
 
 The original GFS paper uses a flat namespace: a mapping from full pathnames to metadata. This may be simple to implement, but it is not very efficient. For example, listing a directory requires listing all files and filtering out the files in the directory. We may also need prefix compression to reduce the memory usage of storing the pathnames. Therefore, in this implementation, we use a tree-structure namespace instead.
 
-### Locking
+The locking scheme from the original paper is used. Typically, if a master operation involves `/d1/d2/.../dn/leaf`, it will acquire read-locks on the directory names `/d1`, `/d1/d2`, ..., `/d1/d2/.../dn`, and either a read lock or a write lock on `/d1/d2/.../dn/leaf`. Since the locking operation is not trivial and is frequently used, a helper function is provided:
 
-To be continued...
+```go
+func (nm *namespaceManager) withRLock(p gfs.Path, f func(*NsTree) error) error
+```
+
+`withRLock` locks all the parent directories of path `p` for reading, and calls `f` on the last node without lock. You should lock the last node inside `f` if necessary. If any of the parent directories does not exist, it returns an error. Otherwise, it returns the error returned by `f`. After `f` returns, it releases all the locks.
+
+### Chunk Locking
+
+This section discusses the locking scheme for chunks. This happens in the primary chunkserver of a chunk. When multiple mutations are performed on a chunk, we need to ensure that all replicas of the chunk perform the mutations in the same order. This implementation simply uses the `RWLock` to achieve this. The primary chunkserver acquires a write lock when applying an mutation. During this time, the primary asks the secondaries to apply the mutation. The lock is released after all secondaries have applied the mutation, or when the mutation fails. Note that the lock can **not** be released before the secondaries apply the mutation, otherwise the secondaries may apply the mutations in different orders.
+
+### Chunkserver Self-Check
+
+Chunkserver will do a self-check when it starts and every time a file I/O error occurs (which may indicate a disk failure). Currently, the self-check only checks the existence of chunks. It will remove the missing chunks from the metadata. It also triggers the master to re-fetch the list of chunks from this chunkserver and to re-replicate the chunks if the number of replicas is below the threshold. It is planned to add more checks in the future.
