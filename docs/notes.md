@@ -42,10 +42,10 @@ Another way to store chunks distributedly is to use a distributed hash table (DH
 
 ### Atomic Record Append
 
-Maintaining consistency when multiple clients are appending to the same file is difficult. GFS provides an atomic record append operation to simplify this task. The operation appends data to the end of a file and returns the offset of the data. GFS guarantees that the
-data is written at least once as an atomic unit (i.e., a continuous sequence of bytes). This is achieved by the lease mechanism.
+Maintaining consistency when multiple clients are appending to the same file is difficult. GFS provides an atomic record append operation to simplify this task. The operation appends data to the end of a file and returns the offset of the data. GFS guarantees that the data is written at least once as an atomic unit (i.e., a continuous sequence of bytes). This is achieved by the lease mechanism.
 
 Every mutation operation can be considered as write or append to a chunk. Since there is multiple replicas of each chunk, we need to ensure that the replicas are consistent. GFS uses a *lease* mechanism to achieve this. The master grants a lease to one of the replicas, called the *primary*. Other replicas are called *secondaries*. The primary picks a serial order for all mutations to the chunk. All replicas follow this order when applying mutations. The client interacts with the primary directly, which also minimizes the burden on the master.
+
 
 ## Implementation Details
 
@@ -66,6 +66,22 @@ func (nm *namespaceManager) withRLock(p gfs.Path, f func(*NsTree) error) error
 ```
 
 `withRLock` locks all the parent directories of path `p` for reading, and calls `f` on the last node without lock. You should lock the last node inside `f` if necessary. If any of the parent directories does not exist, it returns an error. Otherwise, it returns the error returned by `f`. After `f` returns, it releases all the locks.
+
+### Write Operation
+
+![](assets/Figure2-Write-Control-and-Data-Flow.svg)
+
+Here is the detailed process of a write operation:
+
+1. Client asks master for the locations of replicas.
+2. Master replies the primary and the secondaries.
+3. Client pushes data to all replicas in any order. Each chunkserver stores the data in an internal LRU buffer cache until the data is used or aged out.
+4. When all the replicas have acknowledged receiving the data, the client sends a write request to the primary.
+5. The primary forwards the write request to all secondary replicas. Each secondary replica applies mutations in the same order as the primary.
+6. The secondaries all reply to the primary indicating that they have completed the operation.
+7. The primary replies to the client. Any errors encountered at any of the replicas are reported to the client.
+
+In case of errors, the write may have succeeded at the primary and an arbitrary subset of the secondary replicas. The client request is considered to have failed, and the modified region is left in an inconsistent state. The client handles such errors by retrying the failed mutation for `ModifyRetryNum` times from steps (3) through (7). If all retries fail, it returns an error.
 
 ### Chunk Locking
 
